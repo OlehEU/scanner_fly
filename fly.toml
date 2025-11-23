@@ -1,0 +1,18 @@
+# fly.toml — полностью автоматический деплой сканера
+app = "scanner-fly-oz"          # ← твоё имя проекта (можно любое)
+primary_region = "fra"           # Франкфурт — самый быстрый для тебя
+
+[build]
+  dockerfile = "Dockerfile"      # используем наш Dockerfile
+
+[processes]
+  app = "python scanner.py"      # сразу запускаем сканер, а не веб-сервер
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[env]
+  # если захочешь потом добавить ключи Binance или другие переменные
+  # BINANCE_KEY = "xxx"
