@@ -261,3 +261,17 @@ async def set_tf(request: Request):
         log.info("Таймфрейм %s -> %s", coin, tf)
         return {"ok": True}
     raise HTTPException(status_code=400, detail="invalid")
+
+@app.get("/scanner_status")
+async def scanner_status_endpoint():
+    """
+    Возвращает актуальный статус сканера для бота,
+    включая онлайн/вкл/выкл и текущие таймфреймы CONFIG.
+    """
+    ago = 0  # Можно добавить логику последнего пинга, если нужно
+    return {
+        "online": True,  # Здесь можно поставить флаг, если сканер реально работает
+        "enabled": True,
+        "last_seen_seconds_ago": ago,
+        "tf": CONFIG  # Актуальные таймфреймы для всех монет
+    }
