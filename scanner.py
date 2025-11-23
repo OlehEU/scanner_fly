@@ -1,4 +1,4 @@
-# scanner.py — OZ 2026 FINAL EDITION | 100% рабочий, безопасный, бессмертный
+# scanner.py — OZ 2026 ULTIMATE FINAL (исправлена опечатка в default config)
 import asyncio
 import os
 import json
@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request
 # ====================== КОНФИГ ======================
 WEBHOOK     = "https://bot-fly-oz.fly.dev/webhook"
 SECRET      = "supersecret123"
-PING_URL    = "https://scanner-fly-oz.fly.dev/scanner_ping"   # сканер пингует сам себя
+PING_URL    = "https://scanner-fly-oz.fly.dev/scanner_ping"
 STATUS_URL  = "https://bot-fly-oz.fly.dev/scanner_status"
 CONFIG_FILE = "scanner_config.json"
 
@@ -22,14 +22,20 @@ def load_config():
         with open(CONFIG_FILE) as f:
             return json.load(f)
     except FileNotFoundError:
-        default = {"XRP":"3m","SOL5m","ETH15m","BTC15m","DOGE1m"}
+        default = {
+            "XRP": "3m",
+            "SOL": "5m",
+            "ETH": "15m",
+            "BTC": "15m",
+            "DOGE": "1m"
+        }
         with open(CONFIG_FILE, "w") as f:
             json.dump(default, f, indent=2)
         return default
 
 CONFIG = load_config()
 
-# ====================== БИРЖА С КЛЮЧАМИ ИЗ FLY SECRETS ======================
+# ====================== БИРЖА С КЛЮЧАМИ ИЗ SECRETS ======================
 exchange = ccxt.binance({
     'apiKey': os.getenv('BINANCE_API_KEY'),
     'secret': os.getenv('BINANCE_API_SECRET'),
@@ -51,7 +57,7 @@ def log_signal(coin: str, action: str, price: float):
             "price": round(price, 8)
         })
         json.dump(logs[-200:], open(path, "w"), ensure_ascii=False, indent=2)
-    except:
+    except Exception:
         pass
 
 # ====================== ОТПРАВКА СИГНАЛА ======================
@@ -59,7 +65,6 @@ async def send_signal(coin: str, signal: str, extra: dict | None = None):
     payload = {"secret": SECRET, "signal": signal, "coin": coin}
     if extra:
         payload.update(extra)
-
     async with httpx.AsyncClient() as client:
         try:
             await client.post(WEBHOOK, json=payload, timeout=10)
@@ -68,7 +73,7 @@ async def send_signal(coin: str, signal: str, extra: dict | None = None):
             print(f"{datetime.now():%H:%M:%S} → {signal.upper()} {coin} @ {price}")
             log_signal(coin, signal.upper(), price)
         except Exception as e:
-            print("Ошибка отправки сигнала:", e)
+            print("Ошибка сигнала:", e)
 
 # ====================== СКАНИРОВАНИЕ ======================
 async def check_coin(coin: str):
@@ -77,13 +82,11 @@ async def check_coin(coin: str):
         ohlcv = await exchange.fetch_ohlcv(f"{coin}/USDT", tf, limit=120)
         df = pd.DataFrame(ohlcv, columns=['ts','open','high','low','close','volume'])
         df['ema5'] = df['close'].ewm(span=5, adjust=False).mean()
-
         delta = df['close'].diff()
         gain = delta.clip(lower=0).rolling(7).mean()
         loss = -delta.clip(upper=0).rolling(7).mean()
         rs = gain / loss
         df['rsi'] = 100 - (100 / (1 + rs))
-
         df['vol_ma20'] = df['volume'].rolling(20).mean()
 
         close = df['close'].iloc[-1]
@@ -91,7 +94,6 @@ async def check_coin(coin: str):
         rsi = df['rsi'].iloc[-1]
         vol_spike = df['volume'].iloc[-1] > df['vol_ma20'].iloc[-1] * 1.65
 
-        # Проверка позиции
         positions = await exchange.fetch_positions([f"{coin}/USDT"])
         has_position = bool(positions and positions[0].get('contracts', 0) > 0)
 
@@ -101,9 +103,9 @@ async def check_coin(coin: str):
             await send_signal(coin, "close_all")
 
     except Exception as e:
-        print(f"Ошибка сканирования {coin} [{tf}] → {e}")
+        print(f"Ошибка {coin} [{tf}]: {e}")
 
-# ====================== ПИНГ И ОСНОВНОЙ ЦИКЛ ======================
+# ====================== ПИНГ И ЦИКЛ ======================
 async def heartbeat():
     async with httpx.AsyncClient() as client:
         while True:
@@ -129,11 +131,11 @@ async def scanner_loop():
         await asyncio.sleep(8)
 
 # ====================== FASTAPI ======================
-app = FastAPI(title="OZ 2026 Scanner", version="final")
+app = FastAPI(title="OZ 2026 Scanner")
 
 @app.post("/scanner_ping")
 async def ping():
-    return {"status": "alive", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "alive", "ts": datetime.utcnow().isoformat()}
 
 @app.post("/set_tf")
 async def set_tf(request: Request):
@@ -145,17 +147,15 @@ async def set_tf(request: Request):
         with open(CONFIG_FILE, "w") as f:
             json.dump(CONFIG, f, indent=2)
         print(f"Таймфрейм {coin} → {tf}")
-        return {"success": True, "coin": coin, "tf": tf}
-    return {"error": "invalid data"}
+        return {"ok": True}
+    return {"error": "invalid"}
 
-# Современный способ (без DeprecationWarning)
 @app.on_event("startup")
-async def on_startup():
-    print("СКАНЕР OZ 2026 — ЗАПУЩЕН И ГОТОВ К БОЮ!")
+async def startup():
+    print("OZ 2026 — ЗАПУЩЕН НА ВСЮ МОЩЬ!")
     asyncio.create_task(heartbeat())
     asyncio.create_task(scanner_loop())
 
-# ====================== ЗАПУСК ======================
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("scanner:app", host="0.0.0.0", port=8080, reload=False)
