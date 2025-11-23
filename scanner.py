@@ -1,12 +1,12 @@
 # scanner.py — OZ 2026 ULTIMATE PATCHED FLY-READY
 # Требует: BINANCE_API_KEY, BINANCE_API_SECRET, WEBHOOK, WEBHOOK_SECRET
-# Устанавливай переменные окружения в Fly secrets
 
 import asyncio
 import os
 import json
 import logging
 import tempfile
+import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 import pandas as pd
@@ -32,7 +32,7 @@ http_client: Optional[httpx.AsyncClient] = None
 ccxt_exchange: Optional[ccxt.binance] = None
 config_lock = asyncio.Lock()
 log_lock = asyncio.Lock()
-sem = asyncio.Semaphore(4)  # limit concurrent check_coin
+sem = asyncio.Semaphore(4)  # ограничение параллельных check_coin
 background_tasks: List[asyncio.Task] = []
 
 # ======= Helper: atomic write =======
@@ -94,7 +94,6 @@ async def send_signal(coin: str, signal: str, extra: Optional[Dict] = None):
                 if wait:
                     await asyncio.sleep(wait)
                 continue
-            # fetch price AFTER webhook accepted
             try:
                 ticker = await ccxt_exchange.fetch_ticker(f"{coin}/USDT")
                 price = ticker.get("last", None)
@@ -238,6 +237,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="OZ 2026 Scanner (patched)", lifespan=lifespan)
 
+# ======= Endpoints =======
 @app.post("/scanner_ping")
 async def ping(request: Request):
     auth = request.headers.get("Authorization", "")
@@ -263,15 +263,11 @@ async def set_tf(request: Request):
     raise HTTPException(status_code=400, detail="invalid")
 
 @app.get("/scanner_status")
-async def scanner_status_endpoint():
-    """
-    Возвращает актуальный статус сканера для бота,
-    включая онлайн/вкл/выкл и текущие таймфреймы CONFIG.
-    """
-    ago = 0  # Можно добавить логику последнего пинга, если нужно
+async def get_scanner_status():
+    ago = int(time.time()) - CONFIG.get("last_seen", 0)
     return {
-        "online": True,  # Здесь можно поставить флаг, если сканер реально работает
+        "online": True,
         "enabled": True,
         "last_seen_seconds_ago": ago,
-        "tf": CONFIG  # Актуальные таймфреймы для всех монет
+        "tf": CONFIG  # <- возвращаем актуальные таймфреймы
     }
