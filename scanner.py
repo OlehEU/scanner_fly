@@ -51,5 +51,28 @@ async def main():
         await asyncio.gather(*(check(c) for c in COINS))
         await asyncio.sleep(INTERVAL)
 
+# Каждые 45 сек шлём пинг в основной бот, чтобы он знал, что мы живы
+async def heartbeat():
+    while True:
+        try:
+            async with httpx.AsyncClient() as c:
+                await c.post("https://bot-fly-oz.fly.dev/scanner_ping", timeout=10)
+        except:
+            pass
+        await asyncio.sleep(45)
+
+# Запускаем пинг параллельно со сканером
+async def main():
+    print("СКАНЕР OZ 2026 ЗАПУЩЕН — ОТДЕЛЬНЫЙ ПРОЕКТ")
+    # Запускаем пинг и сканер одновременно
+    await asyncio.gather(heartbeat(), real_scanner_loop())  # переименуй свой main() в real_scanner_loop()
+
+# Переименуй свой старый main() в real_scanner_loop() или просто вставь это:
+async def real_scanner_loop():
+    while True:
+        if scanner_status.get("enabled", True):  # будет работать только если включён
+            await asyncio.gather(*(check(c) for c in COINS))
+        await asyncio.sleep(INTERVAL)
+
 if __name__ == "__main__":
     asyncio.run(main())
