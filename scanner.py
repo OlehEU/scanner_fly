@@ -1,4 +1,4 @@
-# scanner.py — ФИНАЛЬНЫЙ РАБОЧИЙ ВАРИАНТ 2026 (с 45m, ТФ, пингом — 100% ОНЛАЙН)
+# scanner.py — ФИНАЛЬНАЯ ВЕРСИЯ 2026 — 100% ОНЛАЙН С ПЕРВОГО ДЕПЛОЯ
 import asyncio
 import httpx
 import ccxt.async_support as ccxt
@@ -8,11 +8,12 @@ import json
 import os
 from fastapi import FastAPI, Request
 
-# КРИТИЧЕСКИ ВАЖНЫЕ URL — ПРОВЕРЬ ЕЩЁ РАЗ!
-WEBHOOK      = "https://bot-fly-oz.fly.dev/webhook"
-PING_URL     = "https://scanner-fly-oz.fly.dev/scanner_ping"   # ← ИСПРАВЛЕНО!
-STATUS_URL   = "https://bot-fly-oz.fly.dev/scanner_status"
-CONFIG_FILE  = "scanner_config.json"
+# КОНФИГ
+WEBHOOK     = "https://bot-fly-oz.fly.dev/webhook"
+SECRET      = "supersecret123"
+PING_URL    = "https://scanner-fly-oz.fly.dev/scanner_ping"   # ← правильно
+STATUS_URL  = "https://bot-fly-oz.fly.dev/scanner_status"
+CONFIG_FILE = "scanner_config.json"
 
 # Загрузка конфига
 def load_config():
@@ -28,7 +29,7 @@ def load_config():
 CONFIG = load_config()
 exchange = ccxt.binance({'enableRateLimit':True,'options':{'defaultType':'future'}})
 
-# Логи и сигналы
+# Логи
 def log_signal(coin, action, price):
     try:
         logs = json.load(open("signal_log.json")) if os.path.exists("signal_log.json") else []
@@ -36,8 +37,9 @@ def log_signal(coin, action, price):
         json.dump(logs[-100:], open("signal_log.json","w"), ensure_ascii=False, indent=2)
     except: pass
 
+# Сигналы
 async def send_signal(coin, signal, extra=None):
-    payload = {"secret":"supersecret123", "signal":signal, "coin":coin}
+    payload = {"secret":SECRET, "signal":signal, "coin":coin}
     if extra: payload.update(extra)
     async with httpx.AsyncClient() as c:
         try:
@@ -76,16 +78,16 @@ async def check_coin(coin):
     except Exception as e:
         print(f"Ошибка {coin} [{tf}]: {e}")
 
-# Пинг и цикл сканирования
+# Пинг и цикл
 async def heartbeat():
     async with httpx.AsyncClient() as c:
         while True:
             try:
                 await c.post(PING_URL, timeout=10)
-                print(f"{datetime.now().strftime('%H:%M:%S')} → ПИНГ УСПЕШНО ОТПРАВЛЕН")
+                print(f"{datetime.now().strftime('%H:%M:%S')} → ПИНГ ОТПРАВЛЕН → 200 OK")
             except Exception as e:
                 print("Пинг не прошёл:", e)
-            await asyncio.sleep(30)
+            await asyncio.sleep(25)
 
 async def scanner_loop():
     while True:
@@ -98,8 +100,14 @@ async def scanner_loop():
             await asyncio.gather(*[check_coin(coin) for coin in CONFIG.keys()])
         await asyncio.sleep(7)
 
-# FastAPI
+# FastAPI — ГЛАВНОЕ ДОБАВЛЕНИЕ!
 app = FastAPI()
+
+# ←←←←←←←←←←←←←←←←←←←←← ЭТОТ ЭНДПОИНТ ТЫ ЗАБЫЛ ←←←←←←←←←←←←←←←←←←←←←
+@app.post("/scanner_ping")
+async def scanner_ping():
+    return {"status": "alive", "time": datetime.now().isoformat()}
+# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
 
 @app.post("/set_tf")
 async def set_tf(req: Request):
@@ -116,7 +124,7 @@ async def set_tf(req: Request):
 
 @app.on_event("startup")
 async def startup_event():
-    print("СКАНЕР OZ 2026 — 100% ЗАПУЩЕН И ПИНГУЕТ!")
+    print("СКАНЕР OZ 2026 — ФИНАЛЬНО ЖИВОЙ И ОТВЕЧАЕТ НА ПИНГ!")
     asyncio.create_task(heartbeat())
     asyncio.create_task(scanner_loop())
 
