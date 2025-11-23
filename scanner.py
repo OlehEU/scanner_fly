@@ -1,78 +1,129 @@
-# scanner.py — отдельный сканер 2026
+# scanner.py — ФИНАЛЬНАЯ ВЕРСИЯ 2026 (отдельный сканер)
 import asyncio
 import httpx
 import ccxt.async_support as ccxt
 import pandas as pd
 from datetime import datetime
+import json
+import os
 
-WEBHOOK = "https://bot-fly-oz.fly.dev/webhook"  # твой основной бот
+# === НАСТРОЙКИ ===
+WEBHOOK = "https://bot-fly-oz.fly.dev/webhook"
 SECRET = "supersecret123"
+PING_URL = "https://bot-fly-oz.fly.dev/scanner_ping"   # для статуса ОНЛАЙН
+STATUS_URL = "https://bot-fly-oz.fly.dev/scanner_status"  # проверяем, включён ли
 
 COINS = ["XRP", "SOL", "ETH", "BTC", "DOGE"]
 TIMEFRAME = "5m"
-INTERVAL = 30
+INTERVAL = 30          # проверка каждые 30 сек
+PING_INTERVAL = 45     # пинг каждые 45 сек
 
-exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
+# Логи сигналов (для /logs в боте)
+LOG_FILE = "signal_log.json"
 
-def rsi(s, p=7): 
-    d = s.diff()
-    g = d.where(d>0,0).rolling(p).mean()
-    l = -d.where(d<0,0).rolling(p).mean()
-    return 100 - 100/(1 + g/l)
+exchange = ccxt.binance({
+    'enableRateLimit': True,
+    'options': {'defaultType': 'future'}
+})
 
-async def send(coin, signal, extra=None):
-    p = {"secret": SECRET, "signal": signal, "coin": coin}
-    if extra: p.update(extra)
-    async with httpx.AsyncClient() as c:
-        await c.post(WEBHOOK, json=p, timeout=10)
-    print(f"{datetime.now().strftime('%H:%M:%S')} → {signal.upper()} {coin}")
-
-async def check(coin):
+# === Логирование сигнала в файл ===
+def log_signal(coin: str, action: str, price: float):
+    entry = {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "date": datetime.now().strftime("%d.%m"),
+        "coin": coin,
+        "action": action,
+        "price": round(price, 6)
+    }
     try:
-        o = await exchange.fetch_ohlcv(f"{coin}/USDT", TIMEFRAME, 100)
-        df = pd.DataFrame(o, columns=['ts','o','h','l','c','v'])
+        if os.path.exists(LOG_FILE):
+            with open(LOG_FILE, "r", encoding="utf-8") as f:
+                logs = json.load(f)
+        else:
+            logs = []
+        logs.append(entry)
+        logs = logs[-100:]  # держим только последние 100
+        with open(LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(logs, f, ensure_ascii=False, indent=2)
+    except:
+        pass  # если не получилось — не страшно
+
+# === Отправка сигнала в основной бот ===
+async def send_signal(coin: str, signal: str, extra=None):
+    payload = {"secret": SECRET, "signal": signal, "coin": coin}
+    if extra:
+        payload.update(extra)
+
+    async with httpx.AsyncClient() as client:
+        try:
+            await client.post(WEBHOOK, json=payload, timeout=10)
+            price = (await exchange.fetch_ticker(f"{coin}/USDT"))["last"]
+            action = "BUY" if signal == "buy" else "SELL"
+            print(f"{datetime.now().strftime('%H:%M:%S')} → {action} {coin} @ {price}")
+            log_signal(coin, action, price)
+        except Exception as e:
+            print(f"Ошибка отправки сигнала {coin}: {e}")
+
+# === Проверка одного коина ===
+async def check_coin(coin: str):
+    try:
+        ohlcv = await exchange.fetch_ohlcv(f"{coin}/USDT", TIMEFRAME, limit=100)
+        df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
         df['ema'] = df['c'].ewm(span=5).mean()
-        df['rsi'] = rsi(df['c'])
+        
+        delta = df['c'].diff()
+        gain = delta.where(delta > 0, 0).rolling(7).mean()
+        loss = -delta.where(delta < 0, 0).rolling(7).mean()
+        df['rsi'] = 100 - (100 / (1 + gain/loss))
         df['vol20'] = df['v'].rolling(20).mean()
 
-        pos = await exchange.fetch_positions([f"{coin}/USDT"])
-        has = pos[0]['contracts'] > 0
+        close = df['c'].iloc[-1]
+        ema = df['ema'].iloc[-1]
+        rsi_val = df['rsi'].iloc[-1]
+        vol_spike = df['v'].iloc[-1] > df['vol20'].iloc[-1] * 1.5
 
-        buy = df['c'].iloc[-1] > df['ema'].iloc[-1] and df['rsi'].iloc[-1] > 40 and df['v'].iloc[-1] > df['vol20'].iloc[-1]*1.5 and not has
-        sell = df['c'].iloc[-1] < df['ema'].iloc[-1] and has
+        positions = await exchange.fetch_positions([f"{coin}/USDT"])
+        has_position = positions[0]['contracts'] > 0
 
-        if buy:  await send(coin, "buy", {"tp":1.5,"sl":1.0,"trail":0.5})
-        if sell: await send(coin, "close_all")
-    except: pass
+        if close > ema and rsi_val > 40 and vol_spike and not has_position:
+            await send_signal(coin, "buy", {"tp": 1.5, "sl": 1.0, "trail": 0.5})
+        elif close < ema and has_position:
+            await send_signal(coin, "close_all")
 
-async def main():
-    print("СКАНЕР OZ 2026 ЗАПУЩЕН — ОТДЕЛЬНЫЙ ПРОЕКТ")
-    while True:
-        await asyncio.gather(*(check(c) for c in COINS))
-        await asyncio.sleep(INTERVAL)
+    except Exception as e:
+        print(f"Ошибка проверки {coin}: {e}")
 
-# Каждые 45 сек шлём пинг в основной бот, чтобы он знал, что мы живы
+# === Пинг — чтобы бот знал, что мы живы ===
 async def heartbeat():
-    while True:
-        try:
-            async with httpx.AsyncClient() as c:
-                await c.post("https://bot-fly-oz.fly.dev/scanner_ping", timeout=10)
-        except:
-            pass
-        await asyncio.sleep(45)
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                await client.post(PING_URL, timeout=10)
+            except:
+                pass
+            await asyncio.sleep(PING_INTERVAL)
 
-# Запускаем пинг параллельно со сканером
+# === Основной цикл сканера (с уважением к кнопке ВКЛ/ВЫКЛ) ===
+async def scanner_loop():
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                # Проверяем, включён ли сканер
+                resp = await client.get(STATUS_URL, timeout=10)
+                status = resp.json()
+                if status.get("enabled", True) and status.get("online", True):
+                    await asyncio.gather(*(check_coin(c) for c in COINS))
+            except:
+                # Если не смогли связаться — всё равно проверяем (на всякий)
+                await asyncio.gather(*(check_coin(c) for c in COINS))
+            await asyncio.sleep(INTERVAL)
+
+# === ЗАПУСК ===
 async def main():
     print("СКАНЕР OZ 2026 ЗАПУЩЕН — ОТДЕЛЬНЫЙ ПРОЕКТ")
-    # Запускаем пинг и сканер одновременно
-    await asyncio.gather(heartbeat(), real_scanner_loop())  # переименуй свой main() в real_scanner_loop()
-
-# Переименуй свой старый main() в real_scanner_loop() или просто вставь это:
-async def real_scanner_loop():
-    while True:
-        if scanner_status.get("enabled", True):  # будет работать только если включён
-            await asyncio.gather(*(check(c) for c in COINS))
-        await asyncio.sleep(INTERVAL)
+    print(f"Мониторим: {', '.join(COINS)} | {TIMEFRAME} | Каждые {INTERVAL}с")
+    # Запускаем пинг и сканер параллельно
+    await asyncio.gather(heartbeat(), scanner_loop())
 
 if __name__ == "__main__":
     asyncio.run(main())
