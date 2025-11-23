@@ -1,4 +1,4 @@
-# scanner.py — ФИНАЛЬНАЯ ВЕРСИЯ 2026 (отдельный сканер)
+# scanner.py — УЛЬТИМАТИВНАЯ ВЕРСИЯ 2026 с управлением ТФ из Telegram
 import asyncio
 import httpx
 import ccxt.async_support as ccxt
@@ -7,26 +7,39 @@ from datetime import datetime
 import json
 import os
 
-# === НАСТРОЙКИ ===
 WEBHOOK = "https://bot-fly-oz.fly.dev/webhook"
 SECRET = "supersecret123"
-PING_URL = "https://bot-fly-oz.fly.dev/scanner_ping"   # для статуса ОНЛАЙН
-STATUS_URL = "https://bot-fly-oz.fly.dev/scanner_status"  # проверяем, включён ли
+PING_URL = "https://bot-fly-oz.fly.dev/scanner_ping"
+STATUS_URL = "https://bot-fly-oz.fly.dev/scanner_status"
 
-COINS = ["XRP", "SOL", "ETH", "BTC", "DOGE"]
-TIMEFRAME = "5m"
-INTERVAL = 30          # проверка каждые 30 сек
-PING_INTERVAL = 45     # пинг каждые 45 сек
+# === НАСТРОЙКИ ПО КОИНАМ (меняются из Telegram!) ===
+CONFIG_FILE = "scanner_config.json"
 
-# Логи сигналов (для /logs в боте)
-LOG_FILE = "signal_log.json"
+DEFAULT_CONFIG = {
+    "XRP":  {"tf": "3m",  "interval": 25},
+    "SOL":  {"tf": "5m",  "interval": 30},
+    "ETH":  {"tf": "15m", "interval": 60},
+    "BTC":  {"tf": "15m", "interval": 60},
+    "DOGE": {"tf": "1m",  "interval": 15},
+}
 
-exchange = ccxt.binance({
-    'enableRateLimit': True,
-    'options': {'defaultType': 'future'}
-})
+def load_config():
+    try:
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    except:
+        save_config(DEFAULT_CONFIG)
+        return DEFAULT_CONFIG.copy()
 
-# === Логирование сигнала в файл ===
+def save_config(cfg):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+CONFIG = load_config()
+
+# === Остальной код без изменений ===
+exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
+
 def log_signal(coin: str, action: str, price: float):
     entry = {
         "time": datetime.now().strftime("%H:%M:%S"),
@@ -36,41 +49,36 @@ def log_signal(coin: str, action: str, price: float):
         "price": round(price, 6)
     }
     try:
-        if os.path.exists(LOG_FILE):
-            with open(LOG_FILE, "r", encoding="utf-8") as f:
+        if os.path.exists("signal_log.json"):
+            with open("signal_log.json") as f:
                 logs = json.load(f)
         else:
             logs = []
         logs.append(entry)
-        logs = logs[-100:]  # держим только последние 100
-        with open(LOG_FILE, "w", encoding="utf-8") as f:
-            json.dump(logs, f, ensure_ascii=False, indent=2)
-    except:
-        pass  # если не получилось — не страшно
+        logs = logs[-100:]
+        with open("signal_log.json", "w") as f:
+            json.dump(logs, f, ensure_ascii=False)
+    except: pass
 
-# === Отправка сигнала в основной бот ===
 async def send_signal(coin: str, signal: str, extra=None):
     payload = {"secret": SECRET, "signal": signal, "coin": coin}
-    if extra:
-        payload.update(extra)
-
-    async with httpx.AsyncClient() as client:
+    if extra: payload.update(extra)
+    async with httpx.AsyncClient() as c:
         try:
-            await client.post(WEBHOOK, json=payload, timeout=10)
+            await c.post(WEBHOOK, json=payload, timeout=10)
             price = (await exchange.fetch_ticker(f"{coin}/USDT"))["last"]
             action = "BUY" if signal == "buy" else "SELL"
             print(f"{datetime.now().strftime('%H:%M:%S')} → {action} {coin} @ {price}")
             log_signal(coin, action, price)
         except Exception as e:
-            print(f"Ошибка отправки сигнала {coin}: {e}")
+            print(f"Ошибка сигнала {coin}: {e}")
 
-# === Проверка одного коина ===
 async def check_coin(coin: str):
+    cfg = CONFIG.get(coin, DEFAULT_CONFIG[coin])
     try:
-        ohlcv = await exchange.fetch_ohlcv(f"{coin}/USDT", TIMEFRAME, limit=100)
+        ohlcv = await exchange.fetch_ohlcv(f"{coin}/USDT", cfg["tf"], limit=100)
         df = pd.DataFrame(ohlcv, columns=['ts','o','h','l','c','v'])
         df['ema'] = df['c'].ewm(span=5).mean()
-        
         delta = df['c'].diff()
         gain = delta.where(delta > 0, 0).rolling(7).mean()
         loss = -delta.where(delta < 0, 0).rolling(7).mean()
@@ -89,40 +97,32 @@ async def check_coin(coin: str):
             await send_signal(coin, "buy", {"tp": 1.5, "sl": 1.0, "trail": 0.5})
         elif close < ema and has_position:
             await send_signal(coin, "close_all")
-
     except Exception as e:
-        print(f"Ошибка проверки {coin}: {e}")
+        print(f"Ошибка {coin}: {e}")
 
-# === Пинг — чтобы бот знал, что мы живы ===
 async def heartbeat():
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient() as c:
         while True:
             try:
-                await client.post(PING_URL, timeout=10)
-            except:
-                pass
-            await asyncio.sleep(PING_INTERVAL)
+                await c.post(PING_URL, timeout=10)
+            except: pass
+            await asyncio.sleep(45)
 
-# === Основной цикл сканера (с уважением к кнопке ВКЛ/ВЫКЛ) ===
 async def scanner_loop():
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient() as c:
         while True:
             try:
-                # Проверяем, включён ли сканер
-                resp = await client.get(STATUS_URL, timeout=10)
-                status = resp.json()
-                if status.get("enabled", True) and status.get("online", True):
-                    await asyncio.gather(*(check_coin(c) for c in COINS))
+                resp = await c.get(STATUS_URL, timeout=10)
+                if resp.json().get("enabled", True):
+                    tasks = [check_coin(coin) for coin in CONFIG.keys()]
+                    await asyncio.gather(*tasks)
             except:
-                # Если не смогли связаться — всё равно проверяем (на всякий)
-                await asyncio.gather(*(check_coin(c) for c in COINS))
-            await asyncio.sleep(INTERVAL)
+                await asyncio.gather(*(check_coin(coin) for coin in CONFIG.keys()))
+            await asyncio.sleep(1)  # чтобы не спамить при ошибке
 
-# === ЗАПУСК ===
 async def main():
-    print("СКАНЕР OZ 2026 ЗАПУЩЕН — ОТДЕЛЬНЫЙ ПРОЕКТ")
-    print(f"Мониторим: {', '.join(COINS)} | {TIMEFRAME} | Каждые {INTERVAL}с")
-    # Запускаем пинг и сканер параллельно
+    print("СКАНЕР OZ 2026 УЛЬТИМА — ЗАПУЩЕН")
+    print("Управление таймфреймами — из Telegram!")
     await asyncio.gather(heartbeat(), scanner_loop())
 
 if __name__ == "__main__":
