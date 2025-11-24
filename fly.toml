@@ -1,20 +1,12 @@
-# fly.toml — ИСПРАВЛЕННАЯ ВЕРСИЯ ДЛЯ OZ SCANNER
-app = "scanner-fly-oz"  # ← оставь своё имя приложения
+app = "scanner-fly-oz"
 
 [build]
-  image = "python:3.11-slim"
+  builder = "paketobuildpacks/builder:base"
 
-[[services]]
-  internal_port = 8080
-  protocol = "tcp"
-
-  [[services.ports]]
-    port = 80
-    handlers = ["http"]
-
-  [[services.ports]]
-    port = 443
-    handlers = ["tls", "http"]
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256
 
 [processes]
-  app = "python main.py"   # ← ВОТ ЭТО ГЛАВНОЕ!
+  app = "python main.py"
