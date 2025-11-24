@@ -190,3 +190,14 @@ def save(tf: dict = None):
         config["tg"][c] = tf.get(f"{c}_tg", config["tg"][c])
 
     return {"status": "saved", "config": config}
+
+import uvicorn
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=False
+    )
+
