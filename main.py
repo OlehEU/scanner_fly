@@ -1,4 +1,4 @@
-# main.py — OZ 2026 УЛЬТИМА | 100% РАБОЧИЙ | НИКАКИХ ОШИБОК
+# main.py — OZ 2026 УЛЬТИМА | ФИНАЛЬНАЯ ВЕРСИЯ | РАБОТАЕТ НА FLY.IO
 import os
 import json
 import time
@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
 from binance.client import Client
 import numpy as np
+import json as json_lib
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("OZ2026")
@@ -25,10 +26,10 @@ SIGNALS_FILE = "signals.json"
 def load(file, default):
     try:
         with open(file, "r", encoding="utf-8") as f:
-            return json.load(f)
+            return json_lib.load(f)
     except:
         with open(file, "w", encoding="utf-8") as f:
-            json.dump(default, f, indent=2)
+            json_lib.dump(default, f, indent=2, ensure_ascii=False)
         return default
 
 config = load(CONFIG_FILE, {"enabled": True, "coins": {c: True for c in COINS}, "tf": {c: "5m" for c in COINS}})
@@ -36,7 +37,7 @@ signals = load(SIGNALS_FILE, [])
 
 def save(file, data):
     with open(file, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+        json_lib.dump(data, f, indent=2, ensure_ascii=False)
 
 client = Client()
 
@@ -96,11 +97,14 @@ async def check_coin(coin: str):
         ema20 = sum(close[-20:]) / 20
         ema50 = sum(close[-50:]) / 50
         rsi_val = rsi(data[-100:])
-        bull_div = low[-3] < low[-10] and rsi_val > rsi(data[-110:-10])[-1] and rsi_val < 35
-        bear_div = high[-3] > high[-10] and rsi_val < rsi(data[-110:-10])[-1] and rsi_val > 65
+        prev_rsi = rsi(data[-110:-10])[-1] if len(data) > 110 else 50
+
+        bull_div = low[-3] < low[-10] and rsi_val > prev_rsi and rsi_val < 35
+        bear_div = high[-3] > high[-10] and rsi_val < prev_rsi and rsi_val > 65
         trend_up = ema20 > ema50 and close[-1] > ema20
         trend_down = ema20 < ema50 and close[-1] < ema20
         vol_spike = volume[-1] > sum(volume[-10:-1]) / 9 * 2
+
         if bull_div and trend_up and vol_spike and rsi_val < 30:
             await send_signal(coin, "LONG")
         elif bear_div and trend_down and vol_spike and rsi_val > 70:
@@ -121,7 +125,7 @@ async def startup():
 def is_auth(r: Request):
     return r.cookies.get("auth") == "777"
 
-LOGIN_HTML = '<html><head><meta charset="utf-8"><title>OZ2026</title><style>body{background:#0d1117;color:#c9d1d9;font-family:Arial;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:linear-gradient(135deg,#0d1117,#1a1f2e)} .b{background:#161b22;padding:50px;border-radius:20px;box-shadow:0 0 30px rgba(88,166,255,.3);text-align:center} input,button{padding:16px 32px;font-size:22px;margin:10px;border-radius:12px;border:none} button{background:#238636;color:#fff;cursor:pointer} h1{color:#58a6ff}</style></head><body><div class="b"><h1>OZ 2026 СКАНЕР</h1><p>Пароль:</p><input type="password" id="p" placeholder="777"><br><button onclick="if(document.getElementById(\'p\').value===\'777\'){document.cookie=\'auth=777;path=/\';location.reload()}else alert(\'Нет\')">ВОЙТИ</button></div></body></html>'
+LOGIN_HTML = """<html><head><meta charset="utf-8"><title>OZ2026</title><style>body{background:#0d1117;color:#c9d1d9;font-family:Arial;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:linear-gradient(135deg,#0d1117,#1a1f2e)} .b{background:#161b22;padding:50px;border-radius:20px;box-shadow:0 0 30px rgba(88,166,255,.3);text-align:center} input,button{padding:16px 32px;font-size:22px;margin:10px;border-radius:12px;border:none} button{background:#238636;color:#fff;cursor:pointer} h1{color:#58a6ff}</style></head><body><div class="b"><h1>OZ 2026 СКАНЕР</h1><p>Пароль:</p><input type="password" id="p" placeholder="777"><br><button onclick="if(document.getElementById('p').value==='777'){document.cookie='auth=777;path=/';location.reload()}else alert('Неверно')">ВОЙТИ</button></div></body></html>"""
 
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request):
@@ -130,6 +134,7 @@ async def root(request: Request):
 
     total = len(signals)
     longs = len([s for s in signals if s["action"] == "LONG"])
+    closes = total - longs
 
     markers = []
     for s in signals[-100:]:
@@ -138,70 +143,94 @@ async def root(request: Request):
             "position": "belowBar" if s["action"] == "LONG" else "aboveBar",
             "color": "#00ff00" if s["action"] == "LONG" else "#ff0000",
             "shape": "arrowUp" if s["action"] == "LONG" else "arrowDown",
-            "text": f"{s['action']} {s['coin'].replace('USDT','')} {s['tf']}"
+            "text": f"{s['action']} {s['coin'][:-4]} {s['tf']}"
         })
-    markers_js = json.dumps(markers, separators=(',', ':'))
+    markers_js = json_lib.dumps(markers, separators=(',', ':'))
 
-    html = f'''<!DOCTYPE html><html><head><meta charset="utf-8"><title>OZ 2026 УЛЬТИМА</title>
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight.min.js"></script>
-    <style>body{{background:#0d1117;color:#c9d1d9;font-family:Arial;margin:0;padding:20px}}
-    .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px;margin:30px 0}}
-    .card{{background:#161b22;padding:25px;border-radius:16px;border:2px solid #30363d}}
-    button{{padding:14px 28px;margin:5px;font-size:18px;border:none;border-radius:10px;cursor:pointer}}
-    .on{{background:#238636;color:#fff}} .off{{background:#f85149;color:#fff}}
-    table{{width:100%;border-collapse:collapse;margin:20px 0}} th,td{{border:1px solid #30363d;padding:12px}}
-    .LONG{{color:#7ce38b}} .CLOSE{{color:#f85149}}
-    </style></head><body>
-    <h1 style="text-align:center;color:#58a6ff">OZ 2026 УЛЬТИМА</h1>
-    <div style="text-align:center;font-size:24px">СИГНАЛОВ: <b>{total}</b> | LONG: <b>{longs}</b></div>
-    <button onclick="fetch('/toggle',{{method:'POST'}}).then(()=>location.reload())" class="{'on' if config['enabled'] else 'off'}">
-        {'ВЫКЛЮЧИТЬ' if config['enabled'] else 'ВКЛЮЧИТЬ'} СКАНЕР
-    </button>
-    <div class="grid">
-    {''.join(f'<div class="card"><h3>{c.replace("USDT","")}</h3><button onclick="fetch(\'/toggle_coin\',{{method:\'POST\',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{coin:\\'{c}\\'}})}}).then(()=>location.reload())" class="{'on' if config['coins'][c] else 'off'}">{"ВКЛ" if config["coins"][c] else "ВЫКЛ"}</button><select onchange="fetch(\'/set_tf\',{{method:\'POST\',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{coin:\\'{c}\\',tf:this.value}})}})">{"".join(f'<option value="{t}" {"selected" if t==config["tf"][c] else ""}>{t}</option>' for t in TF_LIST)}</select></div>' for c in COINS)}
-    </div>
-    <h2>ГРАФИК BTCUSDT 15m</h2>
-    <div id="chart" style="width:100%;height:600px;background:#161b22;border-radius:16px"></div>
-    <h2>Последние 50 сигналов</h2>
-    <table><tr><th>Дата</th><th>Время</th><th>Монета</th><th>ТФ</th><th>Сигнал</th></tr>
-    {''.join(f"<tr><td>{s['date']}</td><td>{s['time']}</td><td><b>{s['coin'].replace('USDT','')}</b></td><td>{s['tf']}</td><td class='{s['action']}'>{s['action']}</td></tr>" for s in signals[-50:][::-1])}
-    </table>
-    <script>
-    const chart = LightweightCharts.createChart(document.getElementById('chart'), {{width:1200,height:600,layout:{{backgroundColor:'#0d1117',textColor:'#c9d1d9'}}}});
-    const series = chart.addCandlestickSeries();
-    fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=500')
-      .then(r=>r.json())
-      .then(d=>{{series.setData(d.map(k=>({{time:k[0]/1000,open:+k[1],high:+k[2],low:+k[3],close:+k[4]}})));series.setMarkers({markers_js});}});
-    chart.timeScale().fitContent();
-    </script></body></html>'''
+    # Генерируем HTML без \ в f-строках
+    cards_html = ""
+    for c in COINS:
+        status_class = "on" if config["coins"][c] else "off"
+        status_text = "ВКЛ" if config["coins"][c] else "ВЫКЛ"
+        coin_name = c.replace("USDT", "")
+        options = "".join(f'<option value="{t}" {"selected" if t==config["tf"][c] else ""}>{t}</option>' for t in TF)
+        cards_html += f'<div class="card"><h3>{coin_name}</h3><button onclick="toggleCoin(\'{c}\')" class="{status_class}">{status_text}</button><select onchange="setTf(\'{c}\',this.value)">{options}</select></div>'
+
+    signals_html = "".join(
+        f"<tr><td>{s['date']}</td><td>{s['time']}</td><td><b>{s['coin'][:-4]}</b></td><td>{s['tf']}</td><td class='{s['action']}'>{s['action']}</td></tr>"
+        for s in signals[-50:][::-1]
+    )
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>OZ 2026 УЛЬТИМА</title>
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight.min.js"></script>
+<style>
+  body{{background:#0d1117;color:#c9d1d9;font-family:Arial;margin:0;padding:20px}}
+  .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px;margin:30px 0}}
+  .card{{background:#161b22;padding:25px;border-radius:16px;border:2px solid #30363d}}
+  button{{padding:14px 28px;margin:5px;font-size:18px;border:none;border-radius:10px;cursor:pointer}}
+  .on{{background:#238636;color:#fff}} .off{{background:#f85149;color:#fff}}
+  table{{width:100%;border-collapse:collapse;margin:20px 0}} th,td{{border:1px solid #30363d;padding:12px}}
+  .LONG{{color:#7ce38b}} .CLOSE{{color:#f85149}}
+</style>
+</head><body>
+<h1 style="text-align:center;color:#58a6ff">OZ 2026 УЛЬТИМА</h1>
+<div style="text-align:center;font-size:24px;margin:20px">
+  Сигналов: <b>{total}</b> | LONG: <b>{longs}</b> | CLOSE: <b>{closes}</b>
+</div>
+<button onclick="fetch('/toggle',{{method:'POST'}}).then(()=>location.reload())" class="{'on' if config['enabled'] else 'off'}">
+  {'ВЫКЛЮЧИТЬ' if config['enabled'] else 'ВКЛЮЧИТЬ'} СКАНЕР
+</button>
+<div class="grid">{cards_html}</div>
+<h2>ГРАФИК BTCUSDT 15m</h2>
+<div id="chart" style="width:100%;height:600px;background:#161b22;border-radius:16px"></div>
+<h2>Последние 50 сигналов</h2>
+<table><tr><th>Дата</th><th>Время</th><th>Монета</th><th>ТФ</th><th>Сигнал</th></tr>
+{signals_html}
+</table>
+<script>
+function toggleCoin(c){{fetch('/toggle_coin',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{coin:c}})}}).then(()=>location.reload())}}
+function setTf(c,tf){{fetch('/set_tf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{coin:c,tf}})}})}}
+const chart = LightweightCharts.createChart(document.getElementById('chart'), {{width:1200,height:600,layout:{{backgroundColor:'#0d1117',textColor:'#c9d1d9'}}}});
+const series = chart.addCandlestickSeries();
+fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=500')
+  .then(r => r.json())
+  .then(data => {{
+    series.setData(data.map(d => ({{time: d[0]/1000, open: +d[1], high: +d[2], low: +d[3], close: +d[4]}})));
+    series.setMarkers({markers_js});
+  }});
+chart.timeScale().fitContent();
+</script>
+</body></html>"""
+
     return HTMLResponse(html)
 
 @app.post("/toggle")
-async def toggle(r: Request):
-    if not is_auth(r): raise HTTPException(403)
+async def toggle(request: Request):
+    if not is_auth(request): raise HTTPException(403)
     config["enabled"] = not config["enabled"]
     save(CONFIG_FILE, config)
     return {"ok": True}
 
 @app.post("/toggle_coin")
-async def toggle_coin(r: Request):
-    if not is_auth(r): raise HTTPException(403)
-    data = await r.json()
+async def toggle_coin(request: Request):
+    if not is_auth(request): raise HTTPException(403)
+    data = await request.json()
     coin = data["coin"]
     config["coins"][coin] = not config["coins"].get(coin, False)
     save(CONFIG_FILE, config)
     return {"ok": True}
 
 @app.post("/set_tf")
-async def set_tf(r: Request):
-    if not is_auth(r): raise HTTPException(403)
-    data = await r.json()
+async def set_tf(request: Request):
+    if not is_auth(request): raise HTTPException(403)
+    data = await request.json()
     config["tf"][data["coin"]] = data["tf"]
     save(CONFIG_FILE, config)
     return {"ok": True}
 
 @app.get("/test_long/{coin}")
-async def test_long(coin: str, r: Request):
-    if not is_auth(r): raise HTTPException(403)
+async def test_long(coin: str, request: Request):
+    if not is_auth(request): raise HTTPException(403)
     await send_signal(coin.upper() + "USDT", "LONG")
     return {"ok": True}
