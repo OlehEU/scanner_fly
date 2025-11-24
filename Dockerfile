@@ -1,16 +1,17 @@
+# Dockerfile — OZ 2026 СКАНЕР | РАБОТАЕТ НА FLY.IO
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Установка зависимостей
+# Копируем только requirements сначала (для кэша)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем код
+# Копируем весь код
 COPY . .
 
-# Экспорт порта для Fly
-EXPOSE 8080
+# ОТКРЫВАЕМ ПРАВИЛЬНЫЙ ПОРТ (важно для fly.io)
+EXPOSE 8000
 
-# Запуск FastAPI через Uvicorn на 0.0.0.0:8080
-CMD ["uvicorn", "scanner:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+# ЗАПУСКАЕМ ПРАВИЛЬНОЕ ИМЯ ФАЙЛА — main.py, а не scanner.py
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
