@@ -4,3 +4,4 @@ httpx
 python-binance
 numpy
 pandas
+jaticker
