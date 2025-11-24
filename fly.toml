@@ -9,10 +9,8 @@ app = "scanner-fly-oz"  # ← замени на своё имя приложен
   memory_mb = 512
 
 [[services]]
-  http_checks = []
   internal_port = 8000
   protocol = "tcp"
-  script_checks = []
 
   [services.concurrency]
     hard_limit = 25
@@ -27,8 +25,16 @@ app = "scanner-fly-oz"  # ← замени на своё имя приложен
     handlers = ["tls", "http"]
     port = 443
 
+  # ←←← ВОТ ЭТИ СТРОКИ СПАСУТ ВСЁ
   [[services.tcp_checks]]
-    grace_period = "10s"
-    interval = "15s"
-    restart_limit = 0
-    timeout = "2s"
+    interval = "10s"
+    timeout = "8s"
+    grace_period = "30s"   # ← даём 30 сек на стартап
+
+  [[services.http_checks]]
+    interval = "10s"
+    timeout = "8s"
+    grace_period = "35s"   # ← главный фикс!
+    method = "get"
+    path = "/"
+    protocol = "http"
