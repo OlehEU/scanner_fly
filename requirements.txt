@@ -3,3 +3,4 @@ uvicorn[standard]
 ccxt
 pandas
 httpx
+jinja2
