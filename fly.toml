@@ -1,17 +1,20 @@
-app = "scanner-fly-oz"
-primary_region = "fra"
+# fly.toml — ИСПРАВЛЕННАЯ ВЕРСИЯ ДЛЯ OZ SCANNER
+app = "scanner-fly-oz"  # ← оставь своё имя приложения
 
 [build]
-  dockerfile = "Dockerfile"
+  image = "python:3.11-slim"
 
-[http_service]
-  internal_port = 8000
-  force_https = true
-  auto_stop_machines = false
-  auto_start_machines = true
-  min_machines_running = 1
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
 
-[[vm]]
-  memory = "1gb"
-  cpu_kind = "shared"
-  cpus = 1
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+[processes]
+  app = "python main.py"   # ← ВОТ ЭТО ГЛАВНОЕ!
