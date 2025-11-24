@@ -5,3 +5,8 @@ python-binance
 numpy
 pandas
 requests
+ccxt
+TA-Lib
+aiohttp
+aiosqlite
+python-telegram-bot
