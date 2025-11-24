@@ -2,7 +2,8 @@ app = "scanner-fly-oz"
 primary_region = "fra"
 
 [build]
-  # Никакого Dockerfile — fly сам соберёт из main.py
+  builder = "paketobuildpacks/builder:base"
+  buildpacks = ["gcr.io/paketo-buildpacks/python"]
 
 [http_service]
   internal_port = 8000
