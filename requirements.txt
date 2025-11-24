@@ -1,8 +1,5 @@
 fastapi
 uvicorn[standard]
-ccxt
-pandas
 httpx
-jinja2
 python-binance
 numpy
