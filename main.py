@@ -1,236 +1,192 @@
-# main.py — OZ 2026 УЛЬТИМА | ФИНАЛЬНАЯ ВЕРСИЯ | РАБОТАЕТ НА FLY.IO
-import os
-import json
-import time
 import logging
-import httpx
-import asyncio
-from datetime import datetime
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse
-from binance.client import Client
+import time
 import numpy as np
-import json as json_lib
+from binance.client import Client
+from jaticker import BinanceClient as JatickerClient
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+import threading
 
+# -------------------------------------------
+#  LOGGING
+# -------------------------------------------
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("OZ2026")
+logger = logging.getLogger("OZ2026")
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://bot-fly-oz.fly.dev/webhook")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "supersecret123")
+# -------------------------------------------
+#  CONFIG
+# -------------------------------------------
+LIST_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
 
-COINS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"]
 TF_LIST = ["1m", "3m", "5m", "15m", "30m", "45m", "1h", "4h"]
-CONFIG_FILE = "config.json"
-SIGNALS_FILE = "signals.json"
 
-def load(file, default):
-    try:
-        with open(file, "r", encoding="utf-8") as f:
-            return json_lib.load(f)
-    except:
-        with open(file, "w", encoding="utf-8") as f:
-            json_lib.dump(default, f, indent=2, ensure_ascii=False)
-        return default
+config = {
+    "tf": {c: "1h" for c in LIST_SYMBOLS},
+    "tg": {c: "" for c in LIST_SYMBOLS},
+}
 
-config = load(CONFIG_FILE, {"enabled": True, "coins": {c: True for c in COINS}, "tf": {c: "5m" for c in COINS}})
-signals = load(SIGNALS_FILE, [])
-
-def save(file, data):
-    with open(file, "w", encoding="utf-8") as f:
-        json_lib.dump(data, f, indent=2, ensure_ascii=False)
-
+# -------------------------------------------
+#  BINANCE CLIENT
+# -------------------------------------------
 client = Client()
+jclient = JatickerClient()
 
-async def get_klines(symbol: str, interval: str, limit=500):
-    try:
-        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-        return [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in klines]
-    except Exception as e:
-        log.error(f"Binance error {symbol}: {e}")
-        return []
-
+# -------------------------------------------
+#  INDICATOR FUNCTIONS
+# -------------------------------------------
 def rsi(data, period=14):
-    close = np.array([x[4] for x in data])
-    delta = np.diff(close)
-    gain = np.maximum(delta, 0)
-    loss = np.maximum(-delta, 0)
-    avg_gain = np.convolve(gain, np.ones(period)/period, mode='valid')
-    avg_loss = np.convolve(loss, np.ones(period)/period, mode='valid')
-    rs = avg_gain / (avg_loss + 1e-10)
+    data = np.array(data, dtype=float)
+    if len(data) < period + 1:
+        return 50  # безопасное значение
+    
+    delta = np.diff(data)
+    up = delta.clip(min=0)
+    down = -delta.clip(max=0)
+    
+    ma_up = up[-period:].mean()
+    ma_down = down[-period:].mean()
+    
+    if ma_down == 0:
+        return 100
+
+    rs = ma_up / ma_down
     rsi_val = 100 - (100 / (1 + rs))
-    return rsi_val[-1] if len(rsi_val) > 0 else 50
+    return rsi_val
 
-async def send_signal(coin: str, action: str):
-    if not config["enabled"] or not config["coins"].get(coin, False):
-        return
-    payload = {"coin": coin.replace("USDT",""), "signal": "buy" if action=="LONG" else "close"}
-    headers = {"Authorization": f"Bearer {WEBHOOK_SECRET}"}
+
+def _stdevup(data):
+    d = np.array(data, dtype=float)
+    return d.mean() + d.std() * 2
+
+
+def _stdevdown(data):
+    d = np.array(data, dtype=float)
+    return d.mean() - d.std() * 2
+
+
+# -------------------------------------------
+#  CHECK COIN LOGIC
+# -------------------------------------------
+def check_coin(symbol):
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            await c.post(WEBHOOK_URL, json=payload, headers=headers)
-        signals.append({
-            "ts": int(time.time()),
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "date": datetime.now().strftime("%d.%m"),
-            "coin": coin,
-            "tf": config["tf"][coin],
-            "action": action
-        })
-        if len(signals) > 2000: signals.pop(0)
-        save(SIGNALS_FILE, signals)
-        log.info(f"СИГНАЛ → {action} {coin} {config['tf'][coin]}")
-    except Exception as e:
-        log.error(f"Webhook error: {e}")
+        tf = config["tf"][symbol]
+        tg = config["tg"][symbol]
 
+        # klines
+        kl = jclient.klines(symbol=symbol, interval=tf, limit=500)
+        closes = [float(x[4]) for x in kl]
+
+        if len(closes) < 200:
+            return
+
+        price = closes[-1]
+
+        rsi_prev = rsi(closes[-110:-10]) if len(closes) > 110 else 50  # <-- FIXED
+
+        sup = _stdevdown(closes[-100:])
+        res = _stdevup(closes[-100:])
+
+        msg = []
+        cond = False
+
+        # SIGNALS
+        if price < sup:
+            cond = True
+            msg.append("Цена ниже поддержки 📉")
+
+        if price > res:
+            cond = True
+            msg.append("Цена выше сопротивления 📈")
+
+        if rsi_prev < 30:
+            cond = True
+            msg.append(f"RSI перепродан ({rsi_prev:.1f}) 🔵")
+
+        if rsi_prev > 70:
+            cond = True
+            msg.append(f"RSI перекуплен ({rsi_prev:.1f}) 🔴")
+
+        if cond:
+            text = f"🔔 Сигнал {symbol}\n" \
+                   f"⏱ TF: {tf}\n" \
+                   f"💰 Цена: {price}\n" \
+                   f"{chr(10).join(msg)}"
+
+            if tg:
+                jclient.send_telegram_message(tg, text)
+
+            logger.info(f"Сигнал отправлен: {symbol}")
+
+    except Exception as e:
+        logger.error(f"Ошибка {symbol}: {e}")
+
+
+# -------------------------------------------
+#  BACKGROUND TASK
+# -------------------------------------------
+def background_worker():
+    while True:
+        for s in LIST_SYMBOLS:
+            check_coin(s)
+            time.sleep(1)
+        time.sleep(3)
+
+
+threading.Thread(target=background_worker, daemon=True).start()
+
+
+# -------------------------------------------
+#  FASTAPI
+# -------------------------------------------
 app = FastAPI()
 
-async def check_coin(coin: str):
-    if not config["coins"].get(coin, False): return
-    tf = config["tf"][coin]
-    try:
-        data = await get_klines(coin, tf, 300)
-        if len(data) < 100: return
-        close = [x[4] for x in data]
-        high = [x[2] for x in data]
-        low = [x[3] for x in data]
-        volume = [x[5] for x in data]
-        ema20 = sum(close[-20:]) / 20
-        ema50 = sum(close[-50:]) / 50
-        rsi_val = rsi(data[-100:])
-        prev_rsi = rsi(data[-110:-10])[-1] if len(data) > 110 else 50
-
-        bull_div = low[-3] < low[-10] and rsi_val > prev_rsi and rsi_val < 35
-        bear_div = high[-3] > high[-10] and rsi_val < prev_rsi and rsi_val > 65
-        trend_up = ema20 > ema50 and close[-1] > ema20
-        trend_down = ema20 < ema50 and close[-1] < ema20
-        vol_spike = volume[-1] > sum(volume[-10:-1]) / 9 * 2
-
-        if bull_div and trend_up and vol_spike and rsi_val < 30:
-            await send_signal(coin, "LONG")
-        elif bear_div and trend_down and vol_spike and rsi_val > 70:
-            await send_signal(coin, "CLOSE")
-    except Exception as e:
-        log.error(f"Ошибка {coin}: {e}")
-
-async def scanner_loop():
-    while True:
-        if config["enabled"]:
-            await asyncio.gather(*[check_coin(c) for c in COINS])
-        await asyncio.sleep(15)
-
-@app.on_event("startup")
-async def startup():
-    asyncio.create_task(scanner_loop())
-
-def is_auth(r: Request):
-    return r.cookies.get("auth") == "777"
-
-LOGIN_HTML = """<html><head><meta charset="utf-8"><title>OZ2026</title><style>body{background:#0d1117;color:#c9d1d9;font-family:Arial;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:linear-gradient(135deg,#0d1117,#1a1f2e)} .b{background:#161b22;padding:50px;border-radius:20px;box-shadow:0 0 30px rgba(88,166,255,.3);text-align:center} input,button{padding:16px 32px;font-size:22px;margin:10px;border-radius:12px;border:none} button{background:#238636;color:#fff;cursor:pointer} h1{color:#58a6ff}</style></head><body><div class="b"><h1>OZ 2026 СКАНЕР</h1><p>Пароль:</p><input type="password" id="p" placeholder="777"><br><button onclick="if(document.getElementById('p').value==='777'){document.cookie='auth=777;path=/';location.reload()}else alert('Неверно')">ВОЙТИ</button></div></body></html>"""
 
 @app.get("/", response_class=HTMLResponse)
-async def root(request: Request):
-    if not is_auth(request):
-        return HTMLResponse(LOGIN_HTML)
+def root():
+    html = """
+    <h2>OZ2026 — Трейдер Панель</h2>
+    <form method='post' action='/save'>
+        <table border='1' cellpadding='5'>
+            <tr><th>Coin</th><th>TF</th><th>Telegram Chat ID</th></tr>
+    """
 
-    total = len(signals)
-    longs = len([s for s in signals if s["action"] == "LONG"])
-    closes = total - longs
+    for c in LIST_SYMBOLS:
+        options = "".join(
+            f'<option value="{t}" {"selected" if t == config["tf"][c] else ""}>{t}</option>'
+            for t in TF_LIST    # <-- FIXED
+        )
 
-    markers = []
-    for s in signals[-100:]:
-        markers.append({
-            "time": s["ts"],
-            "position": "belowBar" if s["action"] == "LONG" else "aboveBar",
-            "color": "#00ff00" if s["action"] == "LONG" else "#ff0000",
-            "shape": "arrowUp" if s["action"] == "LONG" else "arrowDown",
-            "text": f"{s['action']} {s['coin'][:-4]} {s['tf']}"
-        })
-    markers_js = json_lib.dumps(markers, separators=(',', ':'))
+        html += f"""
+            <tr>
+                <td>{c}</td>
+                <td>
+                    <select name='{c}_tf'>
+                        {options}
+                    </select>
+                </td>
+                <td>
+                    <input name='{c}_tg' value='{config["tg"][c]}' />
+                </td>
+            </tr>
+        """
 
-    # Генерируем HTML без \ в f-строках
-    cards_html = ""
-    for c in COINS:
-        status_class = "on" if config["coins"][c] else "off"
-        status_text = "ВКЛ" if config["coins"][c] else "ВЫКЛ"
-        coin_name = c.replace("USDT", "")
-        options = "".join(f'<option value="{t}" {"selected" if t==config["tf"][c] else ""}>{t}</option>' for t in TF)
-        cards_html += f'<div class="card"><h3>{coin_name}</h3><button onclick="toggleCoin(\'{c}\')" class="{status_class}">{status_text}</button><select onchange="setTf(\'{c}\',this.value)">{options}</select></div>'
+    html += """
+        </table>
+        <br>
+        <button type='submit'>💾 Сохранить</button>
+    </form>
+    """
 
-    signals_html = "".join(
-        f"<tr><td>{s['date']}</td><td>{s['time']}</td><td><b>{s['coin'][:-4]}</b></td><td>{s['tf']}</td><td class='{s['action']}'>{s['action']}</td></tr>"
-        for s in signals[-50:][::-1]
-    )
+    return html
 
-    html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>OZ 2026 УЛЬТИМА</title>
-<script src="https://unpkg.com/lightweight-charts/dist/lightweight.min.js"></script>
-<style>
-  body{{background:#0d1117;color:#c9d1d9;font-family:Arial;margin:0;padding:20px}}
-  .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px;margin:30px 0}}
-  .card{{background:#161b22;padding:25px;border-radius:16px;border:2px solid #30363d}}
-  button{{padding:14px 28px;margin:5px;font-size:18px;border:none;border-radius:10px;cursor:pointer}}
-  .on{{background:#238636;color:#fff}} .off{{background:#f85149;color:#fff}}
-  table{{width:100%;border-collapse:collapse;margin:20px 0}} th,td{{border:1px solid #30363d;padding:12px}}
-  .LONG{{color:#7ce38b}} .CLOSE{{color:#f85149}}
-</style>
-</head><body>
-<h1 style="text-align:center;color:#58a6ff">OZ 2026 УЛЬТИМА</h1>
-<div style="text-align:center;font-size:24px;margin:20px">
-  Сигналов: <b>{total}</b> | LONG: <b>{longs}</b> | CLOSE: <b>{closes}</b>
-</div>
-<button onclick="fetch('/toggle',{{method:'POST'}}).then(()=>location.reload())" class="{'on' if config['enabled'] else 'off'}">
-  {'ВЫКЛЮЧИТЬ' if config['enabled'] else 'ВКЛЮЧИТЬ'} СКАНЕР
-</button>
-<div class="grid">{cards_html}</div>
-<h2>ГРАФИК BTCUSDT 15m</h2>
-<div id="chart" style="width:100%;height:600px;background:#161b22;border-radius:16px"></div>
-<h2>Последние 50 сигналов</h2>
-<table><tr><th>Дата</th><th>Время</th><th>Монета</th><th>ТФ</th><th>Сигнал</th></tr>
-{signals_html}
-</table>
-<script>
-function toggleCoin(c){{fetch('/toggle_coin',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{coin:c}})}}).then(()=>location.reload())}}
-function setTf(c,tf){{fetch('/set_tf',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{coin:c,tf}})}})}}
-const chart = LightweightCharts.createChart(document.getElementById('chart'), {{width:1200,height:600,layout:{{backgroundColor:'#0d1117',textColor:'#c9d1d9'}}}});
-const series = chart.addCandlestickSeries();
-fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=500')
-  .then(r => r.json())
-  .then(data => {{
-    series.setData(data.map(d => ({{time: d[0]/1000, open: +d[1], high: +d[2], low: +d[3], close: +d[4]}})));
-    series.setMarkers({markers_js});
-  }});
-chart.timeScale().fitContent();
-</script>
-</body></html>"""
 
-    return HTMLResponse(html)
+@app.post("/save")
+def save(tf: dict = None):
+    if tf is None:
+        return {"error": "no data"}
 
-@app.post("/toggle")
-async def toggle(request: Request):
-    if not is_auth(request): raise HTTPException(403)
-    config["enabled"] = not config["enabled"]
-    save(CONFIG_FILE, config)
-    return {"ok": True}
+    for c in LIST_SYMBOLS:
+        config["tf"][c] = tf.get(f"{c}_tf", config["tf"][c])
+        config["tg"][c] = tf.get(f"{c}_tg", config["tg"][c])
 
-@app.post("/toggle_coin")
-async def toggle_coin(request: Request):
-    if not is_auth(request): raise HTTPException(403)
-    data = await request.json()
-    coin = data["coin"]
-    config["coins"][coin] = not config["coins"].get(coin, False)
-    save(CONFIG_FILE, config)
-    return {"ok": True}
-
-@app.post("/set_tf")
-async def set_tf(request: Request):
-    if not is_auth(request): raise HTTPException(403)
-    data = await request.json()
-    config["tf"][data["coin"]] = data["tf"]
-    save(CONFIG_FILE, config)
-    return {"ok": True}
-
-@app.get("/test_long/{coin}")
-async def test_long(coin: str, request: Request):
-    if not is_auth(request): raise HTTPException(403)
-    await send_signal(coin.upper() + "USDT", "LONG")
-    return {"ok": True}
+    return {"status": "saved", "config": config}
