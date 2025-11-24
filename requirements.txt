@@ -1,12 +1,10 @@
 fastapi
 uvicorn[standard]
-httpx
-python-binance
-numpy
-pandas
-requests
 ccxt
+pandas
+numpy
 TA-Lib
-aiohttp
 aiosqlite
-python-telegram-bot
+aiohttp
+python-multipart
+jinja2
