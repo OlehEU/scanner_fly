@@ -1,4 +1,4 @@
-# main.py — OZ SCANNER ULTRA PRO 2026 — ПЕРСОНАЛЬНЫЕ ТАЙМФРЕЙМЫ ДЛЯ КАЖДОЙ МОНЕТЫ
+# main.py — OZ SCANNER ULTRA PRO 2026 — ОДИН ТАЙМФРЕЙМ НА МОНЕТУ + ПОДТВЕРЖДЕНИЕ
 import ccxt.async_support as ccxt
 import asyncio
 import pandas as pd
@@ -6,7 +6,7 @@ import talib
 import aiosqlite
 import os
 from datetime import datetime
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 import aiohttp
 
@@ -28,38 +28,31 @@ async def init_db():
                 symbol TEXT, tf TEXT, direction TEXT, price REAL, reason TEXT, ts INTEGER
             );
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
-            CREATE TABLE IF NOT EXISTS coin_tfs (
-                symbol TEXT, tf TEXT, enabled INTEGER DEFAULT 1,
-                PRIMARY KEY (symbol, tf)
+            CREATE TABLE IF NOT EXISTS coin_tf (
+                symbol TEXT PRIMARY KEY,
+                tf TEXT
             );
         ''')
         await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('password','777')")
         await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('scanner_enabled','1')")
 
-        # Включаем все ТФ для всех монет по умолчанию
+        # По умолчанию ставим 1h для всех
         for symbol in ALL_SYMBOLS:
-            for tf in ALL_TFS:
-                await db.execute(
-                    "INSERT OR IGNORE INTO coin_tfs (symbol, tf, enabled) VALUES (?,?,1)",
-                    (symbol, tf)
-                )
+            await db.execute(
+                "INSERT OR REPLACE INTO coin_tf (symbol, tf) VALUES (?, '1h')",
+                (symbol,)
+            )
         await db.commit()
 
-async def get_enabled_tfs_for_coin(symbol: str):
+async def get_tf_for_coin(symbol: str) -> str:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT tf FROM coin_tfs WHERE symbol=? AND enabled=1", (symbol,)) as cur:
-            return [row[0] async for row in cur]
-
-async def toggle_tf_for_coin(symbol: str, tf: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT enabled FROM coin_tfs WHERE symbol=? AND tf=?", (symbol, tf)) as cur:
+        async with db.execute("SELECT tf FROM coin_tf WHERE symbol=?", (symbol,)) as cur:
             row = await cur.fetchone()
-            new_val = 0 if row and row[0] == 1 else 1
-        await db.execute(
-            "INSERT INTO coin_tfs (symbol, tf, enabled) VALUES (?,?,?) "
-            "ON CONFLICT(symbol, tf) DO UPDATE SET enabled=excluded.enabled",
-            (symbol, tf, new_val)
-        )
+            return row[0] if row else "1h"
+
+async def set_tf_for_coin(symbol: str, tf: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR REPLACE INTO coin_tf (symbol, tf) VALUES (?, ?)", (symbol, tf))
         await db.commit()
 
 # =================== ТЕЛЕГРАМ И СИГНАЛЫ ===================
@@ -144,20 +137,19 @@ async def check_pair(exchange, symbol, tf):
 # =================== СКАНЕР ===================
 async def scanner_background():
     ex = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
-    await send_telegram("OZ SCANNER ULTRA PRO 2026 — ЗАПУЩЕН\nПерсональные ТФ для каждой монеты\nРазогрев 5 мин...")
+    await send_telegram("OZ SCANNER ULTRA PRO 2026 — ЗАПУЩЕН\nОдин таймфрейм на монету\nРазогрев 5 мин...")
     while True:
         if (await get_setting("scanner_enabled")) != "1":
             await asyncio.sleep(30); continue
 
         tasks = []
         for symbol in ALL_SYMBOLS:
-            enabled_tfs = await get_enabled_tfs_for_coin(symbol)
-            for tf in enabled_tfs:
-                tasks.append(check_pair(ex, symbol, tf))
+            tf = await get_tf_for_coin(symbol)
+            tasks.append(check_pair(ex, symbol, tf))
         await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.sleep(20)
 
-# =================== ВЕБ-АДМИНКА С ПЕРСОНАЛЬНЫМИ ТФ ===================
+# =================== ВЕБ-АДМИНКА ===================
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:10%"><h1>OZ SCANNER ULTRA PRO 2026</h1><form action="/login" method="post"><input type="password" name="password" placeholder="Пароль" style="font-size:24px;padding:12px;width:300px"><br><br><button type="submit" style="font-size:24px;padding:12px 40px">ВОЙТИ</button></form></body></html>'
@@ -171,31 +163,49 @@ async def login(password: str = Form(...)):
 @app.get("/panel", response_class=HTMLResponse)
 async def panel():
     enabled = "ВКЛ" if (await get_setting("scanner_enabled")) == "1" else "ВЫКЛ"
-    html = "<pre style='color:#0f0;background:#000;font-size:20px;line-height:2.6;text-align:center'>"
+    html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:3;text-align:center'>"
     html += f"SCANNER: <b>{enabled}</b>    <a href='/toggle'>[ТОГГЛ]</a>\n\n"
     
     for symbol in ALL_SYMBOLS:
-        html += f"\n<b>{symbol}</b>\n"
-        enabled_tfs = await get_enabled_tfs_for_coin(symbol)
+        current_tf = await get_tf_for_coin(symbol)
+        html += f"\n<b>{symbol}</b> → <b>{current_tf}</b>\n"
+        safe_sym = symbol.replace("/", "%2F")
         for tf in ALL_TFS:
-            status = "ON" if tf in enabled_tfs else "OFF"
-            safe_sym = symbol.replace("/", "%2F")
-            html += f"  <a href='/toggle/{safe_sym}/{tf}'>[{status}] {tf}</a>   "
+            if tf != current_tf:
+                html += f"  <a href='/set/{safe_sym}/{tf}'>[{tf}]</a>  "
+            else:
+                html += f"  <u>[{tf}]</u>  "
         html += "\n"
     
-    html += f"\n<a href='/signals'>СИГНАЛЫ (100)</a>    <a href='/'>ВЫХОД</a></pre>"
+    html += f"\n<a href='/signals'>СИГНАЛЫ</a>    <a href='/'>ВЫХОД</a></pre>"
     return HTMLResponse(html)
+
+@app.get("/set/{symbol}/{tf}")
+async def confirm_set(symbol: str, tf: str):
+    symbol = symbol.replace("%2F", "/")
+    if tf not in ALL_TFS:
+        return HTMLResponse("Ошибка")
+    return HTMLResponse(f"""
+    <body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%">
+    <h1>ПОДТВЕРДИТЬ ИЗМЕНЕНИЕ?</h1>
+    <h2>{symbol} → {tf}</h2>
+    <br><br>
+    <a href='/confirm/{symbol.replace('/', '%2F')}/{tf}' style="background:#0f0;color:#000;padding:20px 40px;font-size:28px;text-decoration:none">ПОДТВЕРДИТЬ</a>
+    <br><br><br>
+    <a href='/panel'>← ОТМЕНА</a>
+    </body>
+    """)
+
+@app.get("/confirm/{symbol}/{tf}")
+async def do_set(symbol: str, tf: str):
+    symbol = symbol.replace("%2F", "/")
+    await set_tf_for_coin(symbol, tf)
+    return RedirectResponse("/panel")
 
 @app.get("/toggle")
 async def toggle_scanner():
     cur = await get_setting("scanner_enabled")
     await set_setting("scanner_enabled", "0" if cur == "1" else "1")
-    return RedirectResponse("/panel")
-
-@app.get("/toggle/{symbol}/{tf}")
-async def toggle_coin_tf(symbol: str, tf: str):
-    symbol = symbol.replace("%2F", "/")
-    await toggle_tf_for_coin(symbol, tf)
     return RedirectResponse("/panel")
 
 @app.get("/signals", response_class=HTMLResponse)
