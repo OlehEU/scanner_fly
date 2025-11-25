@@ -1,4 +1,4 @@
-# main.py — OZ SCANNER 2026 — КРАСИВАЯ ФОРМА ПАРОЛЯ (без расширений)
+# main.py — OZ SCANNER 2026 — ФИНАЛЬНАЯ ВЕРСИЯ С ФОРМОЙ ПАРОЛЯ (РАБОТАЕТ СЕЙЧАС)
 import ccxt.async_support as ccxt
 import asyncio
 import pandas as pd
@@ -9,11 +9,10 @@ import logging
 from datetime import datetime
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 import aiohttp
 
 app = FastAPI()
-templates = Jinja2Templates(directory=".")  # шаблоны в корне
+logging.basicConfig(level=logging.INFO)
 
 # Твои 3 монеты + только 1h по умолчанию
 ALL_SYMBOLS = ["XRP/USDT", "SOL/USDT", "DOGE/USDT"]
@@ -37,7 +36,7 @@ async def init_db():
         await db.execute("INSERT INTO enabled_tfs VALUES ('1h')")
         await db.commit()
 
-async def get_setting(key): 
+async def get_setting(key):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT value FROM settings WHERE key=?", (key,)) as cur:
             row = await cur.fetchone()
@@ -58,15 +57,21 @@ async def get_enabled_tfs():
         async with db.execute("SELECT tf FROM enabled_tfs") as cur:
             return [row[0] async for row in cur]
 
-# =================== СИГНАЛЫ И СКАНЕР (без изменений) ===================
-import aiohttp
+# =================== ТЕЛЕГРАМ ===================
 async def send_telegram(text: str):
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if not token or not chat_id: return
-    async with aiohttp.ClientSession() as s:
-        await s.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                     json={"chat_id": int(chat_id), "text": text, "parse_mode": "HTML", "disable_web_page_preview=True})
+    if not token or not chat_id:
+        return
+    async with aiohttp.ClientSession() as session:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {
+            "chat_id": int(chat_id),
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        await session.post(url, json=payload)
 
 async def send_signal(symbol, tf, direction, price, reason):
     ts = int(datetime.now().timestamp() * 1000)
@@ -77,9 +82,10 @@ async def send_signal(symbol, tf, direction, price, reason):
     text = f"<b>{direction}</b> {symbol} {tf}\nЦена: <code>{price:.6f}</code>\n{reason}\nhttps://www.tradingview.com/chart/?symbol=BINANCE:{symbol.replace('/', '')}&interval={tf}"
     await send_telegram(text)
 
+# =================== СТРАТЕГИЯ ===================
 async def check_pair(exchange, symbol, tf):
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, tf, limit=500)
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=tf, limit=500)
         if len(ohlcv) < 200: return
         df = pd.DataFrame(ohlcv, columns=['ts','open','high','low','close','volume'])
         df['ema34'] = talib.EMA(df['close'], 34)
@@ -97,31 +103,39 @@ async def check_pair(exchange, symbol, tf):
 
         if long: await send_signal(symbol, tf, "LONG", price, "СИЛАЧ")
         if close: await send_signal(symbol, tf, "CLOSE", price, "Фиксируем")
-    except: pass
+    except:
+        pass
 
+# =================== СКАНЕР ===================
 async def scanner_background():
-    ex = ccxt.binance({'apiKey': os.getenv("BINANCE_API_KEY"), 'secret': os.getenv("BINANCE_API_SECRET"),
-                       'enableRateLimit': True, 'options': {'defaultType': 'future'}})
-    await send_telegram("OZ SCANNER 2026 ЗАПУЩЕН\nТолько XRP • SOL • DOGE | 1h по умолчанию")
+    ex = ccxt.binance({
+        'apiKey': os.getenv("BINANCE_API_KEY"),
+        'secret': os.getenv("BINANCE_API_SECRET"),
+        'enableRateLimit': True,
+        'options': {'defaultType': 'future'}
+    })
+    await send_telegram("OZ SCANNER 2026 — ЗАПУЩЕН\nТолько XRP • SOL • DOGE | 1h по умолчанию")
     while True:
         if await get_setting("scanner_enabled") != "1":
-            await asyncio.sleep(15); continue
+            await asyncio.sleep(15)
+            continue
         tasks = [check_pair(ex, s, tf) for s in await get_enabled_coins() for tf in await get_enabled_tfs()]
         await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.sleep(15)
 
-# =================== ГЛАВНАЯ + ФОРМА ПАРОЛЯ ===================
+# =================== ВЕБ ===================
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return """
     <html><head><title>OZ SCANNER 2026</title>
-    <style>body{background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%}</style>
+    <style>body{background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%;font-size:20px}</style>
     </head><body>
     <h1>OZ SCANNER 2026</h1>
     <h2>Только XRP • SOL • DOGE</h2>
     <form action="/login" method="post">
-      <input type="password" name="password" placeholder="Пароль" style="font-size:20px;padding:10px" required>
-      <button type="submit" style="font-size:20px;padding:10px 20px">ВОЙТИ</button>
+      <input type="password" name="password" placeholder="Пароль" style="font-size:24px;padding:12px;width:300px" required autofocus>
+      <br><br>
+      <button type="submit" style="font-size:24px;padding:12px 30px">ВОЙТИ В АДМИНКУ</button>
     </form>
     </body></html>
     """
@@ -130,17 +144,15 @@ async def root():
 async def login(password: str = Form(...)):
     if password == "777":
         return RedirectResponse("/panel", status_code=303)
-    else:
-        return HTMLResponse("<h1 style='color:red;background:#000;padding:100px'>Неверный пароль</h1>")
+    return HTMLResponse("<h1 style='color:red;background:#000;padding:100px'>Неверный пароль, брат</h1>")
 
-# =================== АДМИНКА (теперь без заголовков) ==================
 @app.get("/panel", response_class=HTMLResponse)
-async def panel(request: Request):
+async def panel():
     enabled = "ВКЛ" if await get_setting("scanner_enabled") == "1" else "ВЫКЛ"
     coins = await get_enabled_coins()
     tfs = await get_enabled_tfs()
 
-    html = "<pre style='color:#0f0;background:#000;font-size:20px;line-height:2.5;text-align:center'>"
+    html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:2.8;text-align:center'>"
     html += f"СКАНЕР: <b>{enabled}</b>    <a href='/toggle'>[ВКЛ/ВЫКЛ]</a>\n\nМОНЕТЫ:\n"
     for s in ALL_SYMBOLS:
         status = "ON" if s in coins else "OFF"
@@ -149,7 +161,7 @@ async def panel(request: Request):
     for tf in ALL_TIMEFRAMES:
         status = "ON" if tf in tfs else "OFF"
         html += f"<a href='/toggle_tf/{tf}'>[{status}] {tf}</a>   "
-    html += f"\n\n<a href='/signals'>СИГНАЛЫ</a>    <a href='/logout'>ВЫХОД</a></pre>"
+    html += f"\n\n<a href='/signals'>СИГНАЛЫ</a>    <a href='/'>ВЫХОД</a></pre>"
     return HTMLResponse(html)
 
 @app.get("/toggle")
@@ -171,23 +183,20 @@ async def toggle_coin(symbol: str):
 async def toggle_tf(tf: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM enabled_tfs WHERE tf=?", (tf,))
-        await db.execute("INSERT INTO enabled_tfs VALUES (?)", (tf,)
+        await db.execute("INSERT INTO enabled_tfs VALUES (?)", (tf,))
         await db.commit()
     return RedirectResponse("/panel")
 
-@app.get("/signals", response_class=HTMLResponse)
+@app.get("/signals")
 async def signals():
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT symbol,tf,direction,price,datetime(ts/1000,'unixepoch') FROM signals ORDER BY ts DESC LIMIT 200") as cur:
+        async with db.execute("SELECT symbol,tf,direction,price,reason,datetime(ts/1000,'unixepoch') FROM signals ORDER BY ts DESC LIMIT 200") as cur:
             rows = await cur.fetchall()
-    t = "<table border=1 style='color:#0f0;background:#000;width:100%;margin:20px auto'><tr><th>Монета</th><th>TF</th><th>Сигнал</th><th>Цена</th><th>Время</th></tr>"
+    table = "<table border=1 style='color:#0f0;background:#000;width:90%;margin:20px auto;font-size:18px'><tr><th>Монета</th><th>TF</th><th>Сигнал</th><th>Цена</th><th>Причина</th><th>Время</th></tr>"
     for r in rows:
-        t += f"<tr><td>{r[0]}</td><td>{r[1]}</td><td><b>{r[2]}</b></td><td>{r[3]:.6f}</td><td>{r[4]}</td></tr>"
-    return HTMLResponse(t + "</table><br><a href='/panel'>НАЗАД</a>")
-
-@app.get("/logout")
-async def logout():
-    return RedirectResponse("/")
+        table += f"<tr><td>{r[0]}</td><td>{r[1]}</td><td><b>{r[2]}</b></td><td>{r[3]:.6f}</td><td>{r[4]}</td><td>{r[5]}</td></tr>"
+    table += "</table><br><a href='/panel'>← НАЗАД</a>"
+    return HTMLResponse(table)
 
 @app.on_event("startup")
 async def startup():
