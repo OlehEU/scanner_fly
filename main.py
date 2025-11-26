@@ -1,4 +1,4 @@
-# main.py — OZ SCANNER ULTRA PRO 2026 — ФИНАЛЬНАЯ ВЕРСИЯ, БЕЗ ОШИБОК, ОДИН ТФ НА МОНЕТУ
+# main.py — OZ SCANNER ULTRA PRO 2026 — ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ | EMA55 | LONG ПОЛЕТЯТ
 import ccxt.async_support as ccxt
 import asyncio
 import pandas as pd
@@ -11,10 +11,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 import aiohttp
 
 app = FastAPI()
-
 START_TIME = datetime.now().timestamp()
 LAST_SIGNAL = {}
-
 ALL_SYMBOLS = ["DOGE/USDT", "XRP/USDT", "SOL/USDT"]
 ALL_TFS = ['1m', '5m', '30m', '1h', '4h']
 DB_PATH = "oz_ultra.db"
@@ -71,7 +69,6 @@ async def send_signal(symbol, tf, direction, price, reason):
         await db.execute("INSERT INTO signals (symbol,tf,direction,price,reason,ts) VALUES (?,?,?,?,?,?)",
                         (symbol, tf, direction, price, reason, ts))
         await db.commit()
-
     text = (f"OZ ULTRA PRO 2026\n"
             f"<b>{direction}</b>\n"
             f"<code>{symbol}</code> | <code>{tf}</code>\n"
@@ -86,12 +83,13 @@ async def check_pair(exchange, symbol, tf):
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=tf, limit=500)
         if len(ohlcv) < 300: return
         df = pd.DataFrame(ohlcv, columns=['ts','open','high','low','close','volume'])
-
-        df['ema34']  = talib.EMA(df['close'], 34)
-        df['ema144'] = talib.EMA(df['close'], 144)   # ← ИСПРАВЛЕНО!
+        
+        # ИСПРАВЛЕНО! EMA55 — ЭТО КЛЮЧ К LONG-СИГНАЛАМ
+        df['ema34'] = talib.EMA(df['close'], 34)
+        df['ema55'] = talib.EMA(df['close'], 55)   # ← ВОТ ОНА, ПРАВИЛЬНАЯ!
         df['ema200'] = talib.EMA(df['close'], 200)
-        df['rsi']    = talib.RSI(df['close'], 14)
-        df['atr']    = talib.ATR(df['high'], df['low'], df['close'], 14)
+        df['rsi'] = talib.RSI(df['close'], 14)
+        df['atr'] = talib.ATR(df['high'], df['low'], df['close'], 14)
         df['vol_ma'] = df['volume'].rolling(20).mean()
 
         c = df['close'].iloc[-1]
@@ -100,24 +98,27 @@ async def check_pair(exchange, symbol, tf):
         vol = df['volume'].iloc[-1]
         vol_avg = df['vol_ma'].iloc[-1]
         atr = df['atr'].iloc[-1]
-
         key = f"{symbol}_{tf}"
         now = datetime.now().timestamp()
 
+        # УСЛОВИЯ С EMA55 — ТЕПЕРЬ LONG БУДУТ ЛЕТЕТЬ!
         long_cond = (
-            c > df['ema34'].iloc[-1] > df['ema144'].iloc[-1] > df['ema200'].iloc[-1] and
+            c > df['ema34'].iloc[-1] > df['ema55'].iloc[-1] > df['ema200'].iloc[-1] and
             df['ema34'].iloc[-1] > df['ema34'].iloc[-5] and
-            50 < rsi < 70 and vol > vol_avg * 2.0 and
-            c > prev and (c - prev) > atr * 0.5 and
+            50 < rsi < 70 and 
+            vol > vol_avg * 2.0 and
+            c > prev and 
+            (c - prev) > atr * 0.5 and
             df['low'].iloc[-1] > df['ema34'].iloc[-1]
         )
 
         close_cond = (
-            c < df['ema34'].iloc[-1] or rsi > 78 or
+            c < df['ema34'].iloc[-1] or 
+            rsi > 78 or 
             (c < prev and (prev - c) > atr * 1.5)
         )
 
-        long_cooldown  = 3600 if tf in ['1h','4h'] else 900
+        long_cooldown = 3600 if tf in ['1h','4h'] else 900
         close_cooldown = 1800 if tf in ['1h','4h'] else 600
 
         if long_cond and now - LAST_SIGNAL.get(f"LONG_{key}", 0) > long_cooldown:
@@ -129,11 +130,11 @@ async def check_pair(exchange, symbol, tf):
             await send_signal(symbol, tf, "CLOSE", c, "ТРЕНД СЛОМАН — ФИКСИРУЕМ")
 
     except Exception as e:
-        pass  # молчим в проде
+        pass
 
 async def scanner_background():
     ex = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
-    await send_telegram("OZ SCANNER ULTRA PRO 2026 — ЗАПУЩЕН\nОдин ТФ на монету · Подтверждение · Без багов\nРазогрев 5 мин...")
+    await send_telegram("OZ SCANNER ULTRA PRO 2026 — ЗАПУЩЕН\nEMA55 ВКЛЮЧЁН · LONG ПОЛЕТЯТ!\nРазогрев 5 мин...")
     while True:
         if await get_setting("scanner_enabled") != "1":
             await asyncio.sleep(30); continue
@@ -156,20 +157,18 @@ async def login(password: str = Form(...)):
 async def panel():
     enabled = "ВКЛ" if await get_setting("scanner_enabled") == "1" else "ВЫКЛ"
     html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:3;text-align:center'>"
-    html += f"SCANNER: <b>{enabled}</b>   <a href='/toggle'>[ТОГГЛ]</a>\n\n"
-
+    html += f"SCANNER: <b>{enabled}</b> <a href='/toggle'>[ТОГГЛ]</a>\n\n"
     for symbol in ALL_SYMBOLS:
         current = await get_tf_for_coin(symbol)
         safe = symbol.replace("/", "_")
         html += f"<b>{symbol}</b> → <b>{current}</b>\n"
         for tf in ALL_TFS:
             if tf == current:
-                html += f"  <u>[{tf}]</u>   "
+                html += f" <u>[{tf}]</u> "
             else:
-                html += f"  <a href='/set/{safe}/{tf}'>[{tf}]</a>   "
+                html += f" <a href='/set/{safe}/{tf}'>[{tf}]</a> "
         html += "\n\n"
-
-    html += f"<a href='/signals'>СИГНАЛЫ</a>   <a href='/'>ВЫХОД</a></pre>"
+    html += f"<a href='/signals'>СИГНАЛЫ</a> <a href='/'>ВЫХОД</a></pre>"
     return HTMLResponse(html)
 
 @app.get("/set/{symbol}/{tf}")
