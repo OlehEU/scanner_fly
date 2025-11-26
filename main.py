@@ -1,4 +1,4 @@
-# main.py — OZ SCANNER ULTRA PRO 2026 — ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ | EMA55 | LONG ПОЛЕТЯТ
+# main.py — OZ SCANNER ULTRA PRO 2026 | EMA55 + ВКЛ/ВЫКЛ ПО МОНЕТАМ + ТФ
 import ccxt.async_support as ccxt
 import asyncio
 import pandas as pd
@@ -25,34 +25,37 @@ async def init_db():
                 symbol TEXT, tf TEXT, direction TEXT, price REAL, reason TEXT, ts INTEGER
             );
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
-            CREATE TABLE IF NOT EXISTS coin_tf (symbol TEXT PRIMARY KEY, tf TEXT);
+            CREATE TABLE IF NOT EXISTS coin_settings (
+                symbol TEXT PRIMARY KEY,
+                tf TEXT DEFAULT '1h',
+                enabled INTEGER DEFAULT 1
+            );
         ''')
         await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('password','777')")
-        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('scanner_enabled','1')")
         for s in ALL_SYMBOLS:
-            await db.execute("INSERT OR REPLACE INTO coin_tf (symbol, tf) VALUES (?, '1h')", (s,))
+            await db.execute("INSERT OR IGNORE INTO coin_settings (symbol, tf, enabled) VALUES (?, '1h', 1)", (s,))
         await db.commit()
+
+async def is_coin_enabled(symbol: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT enabled FROM coin_settings WHERE symbol=?", (symbol,)) as cur:
+            row = await cur.fetchone()
+            return bool(row[0]) if row else True
 
 async def get_tf_for_coin(symbol: str) -> str:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT tf FROM coin_tf WHERE symbol=?", (symbol,)) as cur:
+        async with db.execute("SELECT tf FROM coin_settings WHERE symbol=?", (symbol,)) as cur:
             row = await cur.fetchone()
             return row[0] if row else "1h"
 
-async def set_tf_for_coin(symbol: str, tf: str):
+async def set_coin_enabled(symbol: str, enabled: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO coin_tf (symbol, tf) VALUES (?, ?)", (symbol, tf))
+        await db.execute("UPDATE coin_settings SET enabled=? WHERE symbol=?", (enabled, symbol))
         await db.commit()
 
-async def get_setting(key):
+async def set_tf_for_coin(symbol: str, tf: str):
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT value FROM settings WHERE key=?", (key,)) as cur:
-            row = await cur.fetchone()
-            return row[0] if row else None
-
-async def set_setting(key, value):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", (key, value))
+        await db.execute("UPDATE coin_settings SET tf=? WHERE symbol=?", (tf, symbol))
         await db.commit()
 
 async def send_telegram(text: str):
@@ -78,15 +81,16 @@ async def send_signal(symbol, tf, direction, price, reason):
     await send_telegram(text)
 
 async def check_pair(exchange, symbol, tf):
+    if not await is_coin_enabled(symbol):
+        return
     try:
         if datetime.now().timestamp() - START_TIME < 300: return
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=tf, limit=500)
         if len(ohlcv) < 300: return
         df = pd.DataFrame(ohlcv, columns=['ts','open','high','low','close','volume'])
         
-        # ИСПРАВЛЕНО! EMA55 — ЭТО КЛЮЧ К LONG-СИГНАЛАМ
         df['ema34'] = talib.EMA(df['close'], 34)
-        df['ema55'] = talib.EMA(df['close'], 55)   # ← ВОТ ОНА, ПРАВИЛЬНАЯ!
+        df['ema55'] = talib.EMA(df['close'], 55)    # КЛЮЧ К LONG!
         df['ema200'] = talib.EMA(df['close'], 200)
         df['rsi'] = talib.RSI(df['close'], 14)
         df['atr'] = talib.ATR(df['high'], df['low'], df['close'], 14)
@@ -101,7 +105,6 @@ async def check_pair(exchange, symbol, tf):
         key = f"{symbol}_{tf}"
         now = datetime.now().timestamp()
 
-        # УСЛОВИЯ С EMA55 — ТЕПЕРЬ LONG БУДУТ ЛЕТЕТЬ!
         long_cond = (
             c > df['ema34'].iloc[-1] > df['ema55'].iloc[-1] > df['ema200'].iloc[-1] and
             df['ema34'].iloc[-1] > df['ema34'].iloc[-5] and
@@ -134,15 +137,17 @@ async def check_pair(exchange, symbol, tf):
 
 async def scanner_background():
     ex = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
-    await send_telegram("OZ SCANNER ULTRA PRO 2026 — ЗАПУЩЕН\nEMA55 ВКЛЮЧЁН · LONG ПОЛЕТЯТ!\nРазогрев 5 мин...")
+    await send_telegram("OZ SCANNER ULTRA PRO 2026 — ЗАПУЩЕН\nEMA55 + ВКЛ/ВЫКЛ по монетам\nРазогрев 5 мин...")
     while True:
-        if await get_setting("scanner_enabled") != "1":
-            await asyncio.sleep(30); continue
-        tasks = [check_pair(ex, s, await get_tf_for_coin(s)) for s in ALL_SYMBOLS]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = []
+        for s in ALL_SYMBOLS:
+            if await is_coin_enabled(s):
+                tasks.append(check_pair(ex, s, await get_tf_for_coin(s)))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.sleep(20)
 
-# =================== ВЕБ-ПАНЕЛЬ ===================
+# =================== ВЕБ-ПАНЕЛЬ С КНОПКАМИ ВКЛ/ВЫКЛ ===================
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%"><h1>OZ ULTRA PRO 2026</h1><form action="/login" method="post"><input type="password" name="password" placeholder="Пароль" style="font-size:24px;padding:12px;width:300px"><br><br><button type="submit" style="font-size:24px;padding:12px 40px">ВОЙТИ</button></form></body></html>'
@@ -155,21 +160,29 @@ async def login(password: str = Form(...)):
 
 @app.get("/panel", response_class=HTMLResponse)
 async def panel():
-    enabled = "ВКЛ" if await get_setting("scanner_enabled") == "1" else "ВЫКЛ"
     html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:3;text-align:center'>"
-    html += f"SCANNER: <b>{enabled}</b> <a href='/toggle'>[ТОГГЛ]</a>\n\n"
+    html += "OZ ULTRA PRO 2026 — УПРАВЛЕНИЕ\n\n"
     for symbol in ALL_SYMBOLS:
-        current = await get_tf_for_coin(symbol)
+        enabled = "ВКЛ" if await is_coin_enabled(symbol) else "ВЫКЛ"
+        color = "#0f0" if await is_coin_enabled(symbol) else "#800"
+        current_tf = await get_tf_for_coin(symbol)
         safe = symbol.replace("/", "_")
-        html += f"<b>{symbol}</b> → <b>{current}</b>\n"
+        html += f"<b style='color:{color}'>{symbol}</b> — <b>{enabled}</b> <a href='/toggle/{safe}'>[ТОГГЛ]</a>   ТФ: <b>{current_tf}</b>\n"
         for tf in ALL_TFS:
-            if tf == current:
+            if tf == current_tf:
                 html += f" <u>[{tf}]</u> "
             else:
                 html += f" <a href='/set/{safe}/{tf}'>[{tf}]</a> "
         html += "\n\n"
-    html += f"<a href='/signals'>СИГНАЛЫ</a> <a href='/'>ВЫХОД</a></pre>"
+    html += f"<a href='/signals'>СИГНАЛЫ</a>   <a href='/'>ВЫХОД</a></pre>"
     return HTMLResponse(html)
+
+@app.get("/toggle/{symbol}")
+async def toggle_coin(symbol: str):
+    symbol = symbol.replace("_", "/")
+    cur = await is_coin_enabled(symbol)
+    await set_coin_enabled(symbol, 0 if cur else 1)
+    return RedirectResponse("/panel")
 
 @app.get("/set/{symbol}/{tf}")
 async def confirm(symbol: str, tf: str):
@@ -177,12 +190,11 @@ async def confirm(symbol: str, tf: str):
     if tf not in ALL_TFS: return "Ошибка"
     return HTMLResponse(f"""
     <body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%">
-    <h1>ПОДТВЕРДИТЬ?</h1>
+    <h1>СМЕНИТЬ ТФ?</h1>
     <h2>{symbol} → {tf}</h2>
     <br><br>
     <a href="/do/{symbol.replace('/', '_')}/{tf}" style="background:#0f0;color:#000;padding:20px 60px;font-size:32px;text-decoration:none">ДА</a>
-    <br><br><br>
-    <a href="/panel">ОТМЕНА</a>
+    <br><br><a href="/panel">НЕТ</a>
     </body>
     """)
 
@@ -192,12 +204,6 @@ async def do_set(symbol: str, tf: str):
     await set_tf_for_coin(symbol, tf)
     return RedirectResponse("/panel")
 
-@app.get("/toggle")
-async def toggle():
-    cur = await get_setting("scanner_enabled")
-    await set_setting("scanner_enabled", "0" if cur == "1" else "1")
-    return RedirectResponse("/panel")
-
 @app.get("/signals", response_class=HTMLResponse)
 async def signals():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -205,7 +211,8 @@ async def signals():
             rows = await cur.fetchall()
     t = "<table border=1 style='color:#0f0;background:#000;width:95%;margin:auto;font-size:18px;text-align:center'><tr><th>Монета</th><th>ТФ</th><th>Сигнал</th><th>Цена</th><th>Причина</th><th>Время</th></tr>"
     for r in rows:
-        t += f"<tr><td>{r[0]}</td><td>{r[1]}</td><td><b>{r[2]}</b></td><td>{r[3]:.6f}</td><td>{r[4]}</td><td>{r[5]}</td></tr>"
+        color = "#0f0" if r[2] == "LONG" else "#f00"
+        t += f"<tr><td>{r[0]}</td><td>{r[1]}</td><td style='color:{color}'><b>{r[2]}</b></td><td>{r[3]:.6f}</td><td>{r[4]}</td><td>{r[5]}</td></tr>"
     t += "</table><br><a href='/panel'>НАЗАД</a>"
     return HTMLResponse(f"<body style='background:#000;color:#0f0;font-family:monospace'>{t}</body>")
 
