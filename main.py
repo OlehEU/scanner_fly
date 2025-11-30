@@ -9,8 +9,21 @@ from datetime import datetime
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 import aiohttp
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+# ========================= КОНФИГУРАЦИЯ БЕЗОПАСНОСТИ И ЭНДПОИНТОВ =========================
+# ПРОВЕРКА: СЕКРЕТ И ТОКЕН БОТА ДОЛЖНЫ БЫТЬ ОПРЕДЕЛЕНЫ
+required_env = ["TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "WEBHOOK_URL", "WEBHOOK_SECRET"]
+for v in required_env:
+    if not os.getenv(v):
+        # В случае запуска на сервере, эта ошибка будет видна в логах
+        print(f"ОШИБКА: Не определена переменная окружения {v}. СКАНИРОВАНИЕ НЕВОЗМОЖНО.")
+        # Для безопасности оставляем пустыми, но приложение не сможет отправлять сигналы
+        
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://bot-fly-oz.fly.dev/webhook") # Используйте ENV, или оставьте по умолчанию
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") # Секрет, который должен совпадать с секретом торгового бота
 
 # ========================= НАСТРОЙКИ =========================
 ALL_SYMBOLS = ["DOGE/USDT", "XRP/USDT", "SOL/USDT", "FARTCOIN/USDT"]
@@ -19,12 +32,12 @@ DB_PATH = "oz_ultra.db"
 
 # Кулдауны под каждый таймфрейм (в секундах)
 COOLDOWNS = {
-    '1m':  {'long': 240,  'close': 180},
-    '5m':  {'long': 480,  'close': 300},
+    '1m': {'long': 240, 'close': 180},
+    '5m': {'long': 480, 'close': 300},
     '30m': {'long': 1200, 'close': 600},
     '45m': {'long': 1800, 'close': 900},
-    '1h':  {'long': 3600, 'close': 1800},
-    '4h':  {'long': 10800,'close': 5400},
+    '1h': {'long': 3600, 'close': 1800},
+    '4h': {'long': 10800, 'close': 5400},
 }
 
 LAST_SIGNAL = {}  # {"LONG_DOGE/USDT_45m": timestamp, ...}
@@ -44,7 +57,9 @@ async def init_db():
                 enabled INTEGER DEFAULT 1
             );
         ''')
-        await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('password','777')")
+        # Гарантируем, что пароль установлен
+        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('password','777')") 
+        
         # Всегда добавляем все монеты из ALL_SYMBOLS
         for s in ALL_SYMBOLS:
             await db.execute(
@@ -77,35 +92,49 @@ async def set_tf_for_coin(symbol: str, tf: str):
 
 # ========================= ОТПРАВКА =========================
 async def send_telegram(text: str):
-    token = os.getenv("TELEGRAM_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if not token or not chat_id: return
-    async with aiohttp.ClientSession() as session:
-        await session.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                           json={"chat_id": int(chat_id), "text": text, "parse_mode": "HTML", "disable_web_page_preview": True})
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
+    try:
+        async with aiohttp.ClientSession() as session:
+            await session.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                               json={"chat_id": int(TELEGRAM_CHAT_ID), "text": text, "parse_mode": "HTML", "disable_web_page_preview": True})
+    except Exception as e:
+        print(f"[ERROR] Telegram send failed: {e}")
+
 
 async def send_to_oz_webhook(symbol: str, tf: str, direction: str, price: float, reason: str):
-    webhook_url = "https://bot-fly-oz.fly.dev/webhook"
+    if not WEBHOOK_SECRET:
+        print("[WARNING] WEBHOOK_SECRET не установлен. Пропуск отправки на бот.")
+        return
+        
     payload = {
-        "secret": "supersecret123",
-        "symbol": symbol,
+        "symbol": symbol.split('/')[0] + 'USDT', # Отправляем DOGEUSDT вместо DOGE/USDT, как ожидает бот
+        "signal": direction.upper(), 
         "timeframe": tf,
-        "signal": direction.upper(),
         "price": round(price, 8),
         "reason": reason,
         "source": "OZ SCANNER ULTRA PRO 2026 v2.8"
     }
-    async with aiohttp.ClientSession() as session:
+    
+    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отправка секрета в заголовке
+    headers = {
+        "X-Webhook-Secret": WEBHOOK_SECRET
+    }
+    
+    async with aiohttp.ClientSession(headers=headers) as session:
         try:
-            await session.post(webhook_url, json=payload, timeout=10)
-        except:
-            pass
+            async with session.post(WEBHOOK_URL, json=payload, timeout=10) as response:
+                 # Выводим ошибку, если статус не 200 (OK)
+                 if response.status != 200:
+                    print(f"[ERROR] Webhook failed for {symbol}: {response.status} - {await response.text()}")
+        except Exception as e:
+            print(f"[ERROR] Webhook connection failed for {symbol}: {e}")
+
 
 async def send_signal(symbol, tf, direction, price, reason):
     ts = int(datetime.now().timestamp() * 1000)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT INTO signals (symbol,tf,direction,price,reason,ts) VALUES (?,?,?,?,?,?)",
-                        (symbol, tf, direction, price, reason, ts))
+                         (symbol, tf, direction, price, reason, ts))
         await db.commit()
 
     text = (f"OZ ULTRA PRO 2026 v2.8\n"
@@ -123,6 +152,7 @@ async def check_pair(exchange, symbol, tf):
     if not await is_coin_enabled(symbol):
         return
     try:
+        # Убедитесь, что лимит данных достаточен для всех EMA (300+ свечей)
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=tf, limit=500)
         if len(ohlcv) < 300: return
 
@@ -139,28 +169,31 @@ async def check_pair(exchange, symbol, tf):
         rsi = df['rsi'].iloc[-1]
         vol = df['volume'].iloc[-1]
         vol_avg = df['vol_ma20'].iloc[-1]
-        atr = df['atr'].iloc[-1] or 0.000001
+        atr = df['atr'].iloc[-1] or 0.000001 # Защита от деления на ноль
 
         key = f"{symbol}_{tf}"
         now = datetime.now().timestamp()
 
+        # Условия бычьего тренда
         trend_bull = (
             c > df['ema34'].iloc[-1] > df['ema55'].iloc[-1] > df['ema200'].iloc[-1] and
-            df['ema34'].iloc[-1] > df['ema34'].iloc[-3] and
-            df['ema55'].iloc[-1] > df['ema55'].iloc[-8]
+            df['ema34'].iloc[-1] > df['ema34'].iloc[-3] and # EMA34 растет
+            df['ema55'].iloc[-1] > df['ema55'].iloc[-8] # EMA55 растет
         )
 
+        # Условия на вход в LONG
         long_cond = trend_bull and \
                     40 < rsi < 82 and \
                     vol > vol_avg * (1.7 if tf in ['1h','4h','45m'] else 2.4) and \
                     c > prev and \
                     (c - prev) > atr * 0.4 and \
-                    df['low'].iloc[-1] > df['ema34'].iloc[-1] * 0.997
+                    df['low'].iloc[-1] > df['ema34'].iloc[-1] * 0.997 # Защита от пробоя EMA
 
+        # Условия на выход (CLOSE)
         close_cond = (
-            c < df['ema55'].iloc[-1] or
-            (c < df['ema34'].iloc[-1] and rsi > 80) or
-            (c < prev and (prev - c) > atr * 2.2)
+            c < df['ema55'].iloc[-1] or # Цена пробила главную линию поддержки
+            (c < df['ema34'].iloc[-1] and rsi > 80) or # Пробила быструю EMA + RSI перегрет
+            (c < prev and (prev - c) > atr * 2.2) # Резкое движение вниз (ATR)
         )
 
         cd = COOLDOWNS.get(tf, {'long': 3600, 'close': 1800})
@@ -174,31 +207,52 @@ async def check_pair(exchange, symbol, tf):
             await send_signal(symbol, tf, "CLOSE", c, "ТРЕНД СЛОМАН — ФИКСИРУЕМ")
 
     except Exception as e:
+        # Вывод ошибки в консоль, чтобы не прерывать сканер
         print(f"[Ошибка] {symbol} {tf}: {e}")
 
 async def scanner_background():
+    # Настройка CCXT для Futures
     ex = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
-    await send_telegram("OZ SCANNER ULTRA PRO 2026 v2.8 — ЗАПУЩЕН\nFARTCOIN + 45m + ТЕЛЕГА + ХУК\nК миллиардам!")
+    await send_telegram("OZ SCANNER ULTRA PRO 2026 v2.8 — ЗАПУЩЕН\nКонфигурация: FARTCOIN + 45m + ТЕЛЕГА + ХУК\nК миллиардам!")
+    
     while True:
         tasks = []
         for s in ALL_SYMBOLS:
             if await is_coin_enabled(s):
                 tf = await get_tf_for_coin(s)
                 tasks.append(check_pair(ex, s, tf))
+        
+        # Запускаем все проверки параллельно
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        await asyncio.sleep(18)
+            
+        await asyncio.sleep(18) # Пауза между циклами
 
 # ========================= ВЕБ-ПАНЕЛЬ =========================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Инициализация базы данных и запуск фоновой задачи
+    await init_db()
+    asyncio.create_task(scanner_background())
+    yield # Приложение готово к приему запросов
+
+app = FastAPI(lifespan=lifespan)
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%"><h1>OZ ULTRA PRO 2026 v2.8</h1><form action="/login" method="post"><input type="password" name="password" placeholder="Пароль" style="font-size:24px;padding:12px;width:300px"><br><br><button type="submit" style="font-size:24px;padding:12px 40px">ВОЙТИ</button></form></body></html>'
 
 @app.post("/login")
 async def login(password: str = Form(...)):
-    if password == "777":
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM settings WHERE key='password'") as cur:
+            row = await cur.fetchone()
+            correct_password = row[0] if row else "777" # Fallback
+            
+    if password == correct_password:
+        # В реальной жизни здесь нужна сессия/токен, но для простоты перенаправляем
         return RedirectResponse("/panel", status_code=303)
-    return HTMLResponse("<h1 style='color:red'>НЕПРАВИЛЬНЫЙ ПАРОЛЬ</h1>")
+    return HTMLResponse("<h1 style='color:red; background:#000'>НЕПРАВИЛЬНЫЙ ПАРОЛЬ</h1>")
 
 @app.get("/panel", response_class=HTMLResponse)
 async def panel():
@@ -215,7 +269,7 @@ async def panel():
             else:
                 html += f" <a href='/set/{safe}/{tf}'>[{tf}]</a>"
         html += "\n\n"
-    html += f"<a href='/signals'>СИГНАЛЫ</a>   <a href='/'>ВЫХОД</a></pre>"
+    html += f"<a href='/signals'>СИГНАЛЫ</a>   <a href='/'>ВЫХОД</a></pre>"
     return HTMLResponse(html)
 
 @app.get("/toggle/{symbol}")
@@ -228,7 +282,7 @@ async def toggle_coin(symbol: str):
 @app.get("/set/{symbol}/{tf}")
 async def confirm(symbol: str, tf: str):
     symbol = symbol.replace("_", "/")
-    if tf not in ALL_TFS: return "Ошибка"
+    if tf not in ALL_TFS: return HTMLResponse("<h1 style='color:red; background:#000'>НЕВЕРНЫЙ ТАЙМФРЕЙМ</h1>")
     return HTMLResponse(f"<body style='background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%'><h1>СМЕНИТЬ ТФ {symbol} → {tf}?</h1><br><a href='/do/{symbol.replace('/', '_')}/{tf}' style='background:#0f0;color:#000;padding:20px 60px;font-size:32px;text-decoration:none'>ДА</a> <a href='/panel'>НЕТ</a></body>")
 
 @app.get("/do/{symbol}/{tf}")
@@ -242,17 +296,14 @@ async def signals():
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT symbol,tf,direction,price,reason,datetime(ts/1000,'unixepoch','localtime') FROM signals ORDER BY ts DESC LIMIT 100") as cur:
             rows = await cur.fetchall()
+            
     t = "<table border=1 style='color:#0f0;background:#000;width:95%;margin:auto;font-size:18px;text-align:center'><tr><th>Монета</th><th>ТФ</th><th>Сигнал</th><th>Цена</th><th>Причина</th><th>Время</th></tr>"
     for r in rows:
         color = "#0f0" if r[2] == "LONG" else "#f00"
         t += f"<tr><td>{r[0]}</td><td>{r[1]}</td><td style='color:{color}'><b>{r[2]}</b></td><td>{r[3]:.6f}</td><td>{r[4]}</td><td>{r[5]}</td></tr>"
-    t += "</table><br><a href='/panel'>НАЗАД</a>"
+    t += "</table><br><a href='/panel' style='display:block;margin-top:20px;color:#0f0'>НАЗАД</a>"
     return HTMLResponse(f"<body style='background:#000;color:#0f0;font-family:monospace'>{t}</body>")
 
-@app.on_event("startup")
-async def startup():
-    await init_db()
-    asyncio.create_task(scanner_background())
 
 if __name__ == "__main__":
     import uvicorn
