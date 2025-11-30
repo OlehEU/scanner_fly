@@ -1,4 +1,4 @@
-# main.py — OZ SCANNER ULTRA PRO 2026 v2.7 | Финальная версия 2025
+# main.py — OZ SCANNER ULTRA PRO 2026 v2.8 | Финальная версия 2025
 import ccxt.async_support as ccxt
 import asyncio
 import pandas as pd
@@ -15,7 +15,6 @@ app = FastAPI()
 # ========================= НАСТРОЙКИ =========================
 ALL_SYMBOLS = ["DOGE/USDT", "XRP/USDT", "SOL/USDT", "FARTCOIN/USDT"]
 ALL_TFS = ['1m', '5m', '30m', '45m', '1h', '4h']
-
 DB_PATH = "oz_ultra.db"
 
 # Кулдауны под каждый таймфрейм (в секундах)
@@ -46,8 +45,12 @@ async def init_db():
             );
         ''')
         await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('password','777')")
+        # Всегда добавляем все монеты из ALL_SYMBOLS
         for s in ALL_SYMBOLS:
-            await db.execute("INSERT OR IGNORE INTO coin_settings (symbol, tf, enabled) VALUES (?, '1h', 1)", (s,))
+            await db.execute(
+                "INSERT OR IGNORE INTO coin_settings (symbol, tf, enabled) VALUES (?, '1h', 1)",
+                (s,)
+            )
         await db.commit()
 
 async def is_coin_enabled(symbol: str) -> bool:
@@ -90,7 +93,7 @@ async def send_to_oz_webhook(symbol: str, tf: str, direction: str, price: float,
         "signal": direction.upper(),
         "price": round(price, 8),
         "reason": reason,
-        "source": "OZ SCANNER ULTRA PRO 2026 v2.7"
+        "source": "OZ SCANNER ULTRA PRO 2026 v2.8"
     }
     async with aiohttp.ClientSession() as session:
         try:
@@ -105,7 +108,7 @@ async def send_signal(symbol, tf, direction, price, reason):
                         (symbol, tf, direction, price, reason, ts))
         await db.commit()
 
-    text = (f"OZ ULTRA PRO 2026 v2.7\n"
+    text = (f"OZ ULTRA PRO 2026 v2.8\n"
             f"<b>{direction.upper()}</b>\n"
             f"<code>{symbol}</code> | <code>{tf}</code>\n"
             f"Цена: <code>{price:.6f}</code>\n"
@@ -141,7 +144,6 @@ async def check_pair(exchange, symbol, tf):
         key = f"{symbol}_{tf}"
         now = datetime.now().timestamp()
 
-        # Правильный бычий тренд
         trend_bull = (
             c > df['ema34'].iloc[-1] > df['ema55'].iloc[-1] > df['ema200'].iloc[-1] and
             df['ema34'].iloc[-1] > df['ema34'].iloc[-3] and
@@ -176,7 +178,7 @@ async def check_pair(exchange, symbol, tf):
 
 async def scanner_background():
     ex = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
-    await send_telegram("OZ SCANNER ULTRA PRO 2026 v2.7 — ЗАПУЩЕН\nFARTCOIN + 45m + ХУК + ТЕЛЕГА\nГотов к миллиардам!")
+    await send_telegram("OZ SCANNER ULTRA PRO 2026 v2.8 — ЗАПУЩЕН\nFARTCOIN + 45m + ТЕЛЕГА + ХУК\nК миллиардам!")
     while True:
         tasks = []
         for s in ALL_SYMBOLS:
@@ -190,7 +192,7 @@ async def scanner_background():
 # ========================= ВЕБ-ПАНЕЛЬ =========================
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%"><h1>OZ ULTRA PRO 2026 v2.7</h1><form action="/login" method="post"><input type="password" name="password" placeholder="Пароль" style="font-size:24px;padding:12px;width:300px"><br><br><button type="submit" style="font-size:24px;padding:12px 40px">ВОЙТИ</button></form></body></html>'
+    return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%"><h1>OZ ULTRA PRO 2026 v2.8</h1><form action="/login" method="post"><input type="password" name="password" placeholder="Пароль" style="font-size:24px;padding:12px;width:300px"><br><br><button type="submit" style="font-size:24px;padding:12px 40px">ВОЙТИ</button></form></body></html>'
 
 @app.post("/login")
 async def login(password: str = Form(...)):
@@ -200,7 +202,7 @@ async def login(password: str = Form(...)):
 
 @app.get("/panel", response_class=HTMLResponse)
 async def panel():
-    html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:3;text-align:center'>OZ ULTRA PRO 2026 v2.7 — УПРАВЛЕНИЕ\n\n"
+    html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:3;text-align:center'>OZ ULTRA PRO 2026 v2.8 — УПРАВЛЕНИЕ\n\n"
     for symbol in ALL_SYMBOLS:
         enabled = "ВКЛ" if await is_coin_enabled(symbol) else "ВЫКЛ"
         color = "#0f0" if await is_coin_enabled(symbol) else "#800"
@@ -208,7 +210,10 @@ async def panel():
         safe = symbol.replace("/", "_")
         html += f"<b style='color:{color}'>{symbol}</b> — <b>{enabled}</b> <a href='/toggle/{safe}'>[ТОГГЛ]</a> ТФ: <b>{current_tf}</b>\n"
         for tf in ALL_TFS:
-            html += f" <a href='/set/{safe}/{tf}'>[{tf}]</a>" if tf != current_tf else f" <u>[{tf}]</u>"
+            if tf == current_tf:
+                html += f" <u>[{tf}]</u>"
+            else:
+                html += f" <a href='/set/{safe}/{tf}'>[{tf}]</a>"
         html += "\n\n"
     html += f"<a href='/signals'>СИГНАЛЫ</a>   <a href='/'>ВЫХОД</a></pre>"
     return HTMLResponse(html)
