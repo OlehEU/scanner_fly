@@ -1,4 +1,3 @@
-# main.py — OZ SCANNER ULTRA PRO 2026 v2.8 | Финальная версия 2025
 import ccxt.async_support as ccxt
 import asyncio
 import pandas as pd
@@ -40,9 +39,9 @@ COOLDOWNS = {
     '4h': {'long': 10800, 'close': 5400},
 }
 
-LAST_SIGNAL = {}  # {"LONG_DOGE/USDT_45m": timestamp, ...}
+LAST_SIGNAL = {} # {"LONG_DOGE/USDT_45m": timestamp, ...}
 
-# ========================= БАЗА =========================
+# ========================= БАЗА (ДОБАВЛЕНЫ НОВЫЕ ФУНКЦИИ) =========================
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript('''
@@ -58,7 +57,9 @@ async def init_db():
             );
         ''')
         # Гарантируем, что пароль установлен
-        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('password','777')") 
+        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('password','777')")
+        # Гарантируем, что настройка CLOSE-сигналов установлена (по умолчанию ВКЛ = 1)
+        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('close_signals_enabled','1')")
         
         # Всегда добавляем все монеты из ALL_SYMBOLS
         for s in ALL_SYMBOLS:
@@ -88,6 +89,21 @@ async def set_coin_enabled(symbol: str, enabled: int):
 async def set_tf_for_coin(symbol: str, tf: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE coin_settings SET tf=? WHERE symbol=?", (tf, symbol))
+        await db.commit()
+
+# НОВАЯ ФУНКЦИЯ: Получение статуса CLOSE-сигналов
+async def get_close_enabled() -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM settings WHERE key='close_signals_enabled'") as cur:
+            row = await cur.fetchone()
+            # По умолчанию ВКЛЮЧЕНО (True)
+            return row and row[0] == '1'
+        
+# НОВАЯ ФУНКЦИЯ: Установка статуса CLOSE-сигналов
+async def set_close_enabled(enabled: int):
+    status = '1' if enabled else '0'
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE settings SET value=? WHERE key='close_signals_enabled'", (status,))
         await db.commit()
 
 # ========================= ОТПРАВКА =========================
@@ -123,9 +139,9 @@ async def send_to_oz_webhook(symbol: str, tf: str, direction: str, price: float,
     async with aiohttp.ClientSession(headers=headers) as session:
         try:
             async with session.post(WEBHOOK_URL, json=payload, timeout=10) as response:
-                 # Выводим ошибку, если статус не 200 (OK)
-                 if response.status != 200:
-                    print(f"[ERROR] Webhook failed for {symbol}: {response.status} - {await response.text()}")
+                    # Выводим ошибку, если статус не 200 (OK)
+                    if response.status != 200:
+                        print(f"[ERROR] Webhook failed for {symbol}: {response.status} - {await response.text()}")
         except Exception as e:
             print(f"[ERROR] Webhook connection failed for {symbol}: {e}")
 
@@ -134,7 +150,7 @@ async def send_signal(symbol, tf, direction, price, reason):
     ts = int(datetime.now().timestamp() * 1000)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT INTO signals (symbol,tf,direction,price,reason,ts) VALUES (?,?,?,?,?,?)",
-                         (symbol, tf, direction, price, reason, ts))
+                             (symbol, tf, direction, price, reason, ts))
         await db.commit()
 
     text = (f"OZ ULTRA PRO 2026 v2.8\n"
@@ -183,11 +199,11 @@ async def check_pair(exchange, symbol, tf):
 
         # Условия на вход в LONG
         long_cond = trend_bull and \
-                    40 < rsi < 82 and \
-                    vol > vol_avg * (1.7 if tf in ['1h','4h','45m'] else 2.4) and \
-                    c > prev and \
-                    (c - prev) > atr * 0.4 and \
-                    df['low'].iloc[-1] > df['ema34'].iloc[-1] * 0.997 # Защита от пробоя EMA
+                     40 < rsi < 82 and \
+                     vol > vol_avg * (1.7 if tf in ['1h','4h','45m'] else 2.4) and \
+                     c > prev and \
+                     (c - prev) > atr * 0.4 and \
+                     df['low'].iloc[-1] > df['ema34'].iloc[-1] * 0.997 # Защита от пробоя EMA
 
         # Условия на выход (CLOSE)
         close_cond = (
@@ -202,7 +218,14 @@ async def check_pair(exchange, symbol, tf):
             LAST_SIGNAL[f"LONG_{key}"] = now
             await send_signal(symbol, tf, "LONG", c, "МОЩНЫЙ ТРЕНД + ОБЪЁМ + EMA55")
 
+        is_close_enabled = await get_close_enabled() # Получаем статус из базы
+        
         if close_cond and now - LAST_SIGNAL.get(f"CLOSE_{key}", 0) > cd['close']:
+            if not is_close_enabled:
+                 # Игнорируем, если отключено. Отправляем только в телегу для уведомления
+                await send_telegram(f"<b>CLOSE {symbol}</b> — Игнорируется по настройке админ-панели.")
+                return
+
             LAST_SIGNAL[f"CLOSE_{key}"] = now
             await send_signal(symbol, tf, "CLOSE", c, "ТРЕНД СЛОМАН — ФИКСИРУЕМ")
 
@@ -213,7 +236,7 @@ async def check_pair(exchange, symbol, tf):
 async def scanner_background():
     # Настройка CCXT для Futures
     ex = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
-    await send_telegram("OZ SCANNER ULTRA PRO 2026 v2.8 — ЗАПУЩЕН\nКонфигурация: FARTCOIN + 45m + ТЕЛЕГА + ХУК\nК миллиардам!")
+    await send_telegram("OZ SCANNER ULTRA PRO 2026 v2.8 — ЗАПУЩЕН\nК миллиардам!")
     
     while True:
         tasks = []
@@ -257,19 +280,36 @@ async def login(password: str = Form(...)):
 @app.get("/panel", response_class=HTMLResponse)
 async def panel():
     html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:3;text-align:center'>OZ ULTRA PRO 2026 v2.8 — УПРАВЛЕНИЕ\n\n"
+    
+    # Секция управления монетами
     for symbol in ALL_SYMBOLS:
-        enabled = "ВКЛ" if await is_coin_enabled(symbol) else "ВЫКЛ"
-        color = "#0f0" if await is_coin_enabled(symbol) else "#800"
+        is_enabled = await is_coin_enabled(symbol)
+        enabled_status = "ВКЛ" if is_enabled else "ВЫКЛ"
+        color = "#0f0" if is_enabled else "#800"
         current_tf = await get_tf_for_coin(symbol)
         safe = symbol.replace("/", "_")
-        html += f"<b style='color:{color}'>{symbol}</b> — <b>{enabled}</b> <a href='/toggle/{safe}'>[ТОГГЛ]</a> ТФ: <b>{current_tf}</b>\n"
+        
+        # Обновленная, более понятная кнопка-переключатель
+        toggle_label = "ОТКЛЮЧИТЬ" if is_enabled else "ВКЛЮЧИТЬ"
+        
+        html += f"<b style='color:{color}'>{symbol}</b> — <b>{enabled_status}</b> <a href='/toggle/{safe}'>[{toggle_label}]</a> ТФ: <b>{current_tf}</b>\n"
         for tf in ALL_TFS:
             if tf == current_tf:
                 html += f" <u>[{tf}]</u>"
             else:
                 html += f" <a href='/set/{safe}/{tf}'>[{tf}]</a>"
         html += "\n\n"
-    html += f"<a href='/signals'>СИГНАЛЫ</a>   <a href='/'>ВЫХОД</a></pre>"
+        
+    # НОВАЯ СЕКЦИЯ: Глобальное управление CLOSE-сигналами
+    is_close_enabled = await get_close_enabled()
+    close_status_text = "ВКЛЮЧЕН" if is_close_enabled else "ОТКЛЮЧЕН"
+    close_toggle_label = "ОТКЛЮЧИТЬ" if is_close_enabled else "ВКЛЮЧИТЬ"
+    close_color = "#0f0" if is_close_enabled else "#f00"
+    
+    html += f"\n<b>ГЛОБАЛЬНЫЕ НАСТРОЙКИ:</b>\n"
+    html += f"Обработка CLOSE: <b style='color:{close_color}'>{close_status_text}</b> <a href='/toggle-close'>[{close_toggle_label}]</a>\n\n"
+    
+    html += f"<a href='/signals'>СИГНАЛЫ</a>  <a href='/'>ВЫХОД</a></pre>"
     return HTMLResponse(html)
 
 @app.get("/toggle/{symbol}")
@@ -277,7 +317,14 @@ async def toggle_coin(symbol: str):
     symbol = symbol.replace("_", "/")
     cur = await is_coin_enabled(symbol)
     await set_coin_enabled(symbol, 0 if cur else 1)
-    return RedirectResponse("/panel")
+    return RedirectResponse("/panel", status_code=303)
+
+# НОВЫЙ МАРШРУТ: Переключение глобального статуса CLOSE
+@app.get("/toggle-close")
+async def toggle_close():
+    cur = await get_close_enabled()
+    await set_close_enabled(0 if cur else 1)
+    return RedirectResponse("/panel", status_code=303)
 
 @app.get("/set/{symbol}/{tf}")
 async def confirm(symbol: str, tf: str):
@@ -289,7 +336,7 @@ async def confirm(symbol: str, tf: str):
 async def do_set(symbol: str, tf: str):
     symbol = symbol.replace("_", "/")
     await set_tf_for_coin(symbol, tf)
-    return RedirectResponse("/panel")
+    return RedirectResponse("/panel", status_code=303)
 
 @app.get("/signals", response_class=HTMLResponse)
 async def signals():
