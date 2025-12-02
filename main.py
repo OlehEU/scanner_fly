@@ -26,8 +26,10 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://bot-fly-oz.fly.dev/webhook")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") 
 
 # ========================= НАСТРОЙКИ =========================
-ALL_SYMBOLS = ["DOGE/USDT", "XRP/USDT", "SOL/USDT", "FARTCOIN/USDT"]
-ALL_TFS = ['1m', '5m', '30m', '45m', '1h', '4h']
+# ДОБАВЛЕНО: ETH/USDT и BNB/USDT
+ALL_SYMBOLS = ["ETH/USDT", "BNB/USDT", "DOGE/USDT", "XRP/USDT", "SOL/USDT", "FARTCOIN/USDT"]
+# ИСПРАВЛЕНО: Убран '45m' из списка доступных таймфреймов
+ALL_TFS = ['1m', '5m', '30m', '1h', '4h']
 DB_PATH = "oz_ultra.db"
 
 # Кулдауны под каждый таймфрейм (в секундах)
@@ -35,7 +37,7 @@ COOLDOWNS = {
     '1m': {'long': 240, 'close': 180},
     '5m': {'long': 480, 'close': 300},
     '30m': {'long': 1200, 'close': 600},
-    '45m': {'long': 1800, 'close': 900},
+    # '45m': {'long': 1800, 'close': 900},  # Теперь не используется
     '1h': {'long': 3600, 'close': 1800},
     '4h': {'long': 10800, 'close': 5400},
 }
@@ -194,6 +196,7 @@ async def check_pair(exchange, symbol, tf):
             (c < prev and (prev - c) > atr * 2.2)
         )
 
+        # Обратите внимание: COOLDOWNS также изменились выше, чтобы соответствовать ALL_TFS
         cd = COOLDOWNS.get(tf, {'long': 3600, 'close': 1800})
 
         if long_cond and now - LAST_SIGNAL.get(f"LONG_{key}", 0) > cd['long']:
