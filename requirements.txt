@@ -8,3 +8,4 @@ aiosqlite
 aiohttp
 python-multipart
 jinja2
+httpx
