@@ -17,15 +17,15 @@ for v in required_env:
     if not os.getenv(v):
         # В случае запуска на сервере, эта ошибка будет видна в логах
         print(f"ОШИБКА: Не определена переменная окружения {v}. СКАНИРОВАНИЕ НЕВОЗМОЖНО.")
-        # Для безопасности оставляем пустыми, но приложение не сможет отправлять сигналы
         
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://bot-fly-oz.fly.dev/webhook") # Используйте ENV, или оставьте по умолчанию
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") # Секрет, который должен совпадать с секретом торгового бота
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://bot-fly-oz.fly.dev/webhook")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
 # ========================= НАСТРОЙКИ =========================
-ALL_SYMBOLS = ["DOGE/USDT", "XRP/USDT", "SOL/USDT", "FARTCOIN/USDT"]
+# Более волатильные, высоколиквидные монеты для лучшей работы сканера
+ALL_SYMBOLS = ["SOL/USDT", "LINK/USDT", "MATIC/USDT", "DOGE/USDT", "XRP/USDT", "SHIB/USDT"]
 ALL_TFS = ['1m', '5m', '30m', '45m', '1h', '4h']
 DB_PATH = "oz_ultra.db"
 
@@ -41,7 +41,7 @@ COOLDOWNS = {
 
 LAST_SIGNAL = {} # {"LONG_DOGE/USDT_45m": timestamp, ...}
 
-# ========================= БАЗА (ДОБАВЛЕНЫ НОВЫЕ ФУНКЦИИ) =========================
+# ========================= БАЗА =========================
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript('''
@@ -56,12 +56,10 @@ async def init_db():
                 enabled INTEGER DEFAULT 1
             );
         ''')
-        # Гарантируем, что пароль установлен
         await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('password','777')")
-        # Гарантируем, что настройка CLOSE-сигналов установлена (по умолчанию ВКЛ = 1)
         await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('close_signals_enabled','1')")
         
-        # Всегда добавляем все монеты из ALL_SYMBOLS
+        # Обновляем или добавляем настройки для новых монет
         for s in ALL_SYMBOLS:
             await db.execute(
                 "INSERT OR IGNORE INTO coin_settings (symbol, tf, enabled) VALUES (?, '1h', 1)",
@@ -91,15 +89,12 @@ async def set_tf_for_coin(symbol: str, tf: str):
         await db.execute("UPDATE coin_settings SET tf=? WHERE symbol=?", (tf, symbol))
         await db.commit()
 
-# НОВАЯ ФУНКЦИЯ: Получение статуса CLOSE-сигналов
 async def get_close_enabled() -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT value FROM settings WHERE key='close_signals_enabled'") as cur:
             row = await cur.fetchone()
-            # По умолчанию ВКЛЮЧЕНО (True)
             return row and row[0] == '1'
         
-# НОВАЯ ФУНКЦИЯ: Установка статуса CLOSE-сигналов
 async def set_close_enabled(enabled: int):
     status = '1' if enabled else '0'
     async with aiosqlite.connect(DB_PATH) as db:
@@ -108,30 +103,36 @@ async def set_close_enabled(enabled: int):
 
 # ========================= ОТПРАВКА =========================
 async def send_telegram(text: str):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
+    # Логирование: уведомляем о попытке отправки в Телеграм
+    print(f"[LOG] Попытка отправить в Telegram: {text[:50]}...")
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: 
+        print("[WARNING] Пропуск Telegram: Токен или Chat ID не заданы.")
+        return
     try:
         async with aiohttp.ClientSession() as session:
             await session.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                                json={"chat_id": int(TELEGRAM_CHAT_ID), "text": text, "parse_mode": "HTML", "disable_web_page_preview": True})
+            print("[LOG] Успешно отправлено в Telegram.")
     except Exception as e:
-        print(f"[ERROR] Telegram send failed: {e}")
+        print(f"[ERROR] Сбой отправки в Telegram: {e}")
 
 
 async def send_to_oz_webhook(symbol: str, tf: str, direction: str, price: float, reason: str):
+    # Логирование: уведомляем о попытке отправки на Webhook
+    print(f"[LOG] Попытка отправить на Webhook: {direction} {symbol}")
     if not WEBHOOK_SECRET:
         print("[WARNING] WEBHOOK_SECRET не установлен. Пропуск отправки на бот.")
         return
         
     payload = {
-        "symbol": symbol.split('/')[0] + 'USDT', # Отправляем DOGEUSDT вместо DOGE/USDT, как ожидает бот
+        "symbol": symbol.split('/')[0] + 'USDT',
         "signal": direction.upper(), 
         "timeframe": tf,
         "price": round(price, 8),
         "reason": reason,
-        "source": "OZ SCANNER ULTRA PRO 2026 v2.8"
+        "source": "OZ SCANNER ULTRA PRO 2026 v3.0" # Обновление версии
     }
     
-    # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Отправка секрета в заголовке
     headers = {
         "X-Webhook-Secret": WEBHOOK_SECRET
     }
@@ -139,21 +140,30 @@ async def send_to_oz_webhook(symbol: str, tf: str, direction: str, price: float,
     async with aiohttp.ClientSession(headers=headers) as session:
         try:
             async with session.post(WEBHOOK_URL, json=payload, timeout=10) as response:
-                    # Выводим ошибку, если статус не 200 (OK)
                     if response.status != 200:
-                        print(f"[ERROR] Webhook failed for {symbol}: {response.status} - {await response.text()}")
+                        print(f"[ERROR] Webhook не сработал для {symbol}: {response.status} - {await response.text()}")
+                    else:
+                        print(f"[LOG] Успешно отправлено на Webhook для {symbol}.")
         except Exception as e:
-            print(f"[ERROR] Webhook connection failed for {symbol}: {e}")
+            print(f"[ERROR] Сбой подключения Webhook для {symbol}: {e}")
 
 
 async def send_signal(symbol, tf, direction, price, reason):
+    # Логирование: Подтверждаем, что функция сработала
+    print(f"[LOG] >>> СИГНАЛ: {direction} {symbol} {tf} @ {price:.6f} <<<")
     ts = int(datetime.now().timestamp() * 1000)
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT INTO signals (symbol,tf,direction,price,reason,ts) VALUES (?,?,?,?,?,?)",
-                             (symbol, tf, direction, price, reason, ts))
-        await db.commit()
+    
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("INSERT INTO signals (symbol,tf,direction,price,reason,ts) VALUES (?,?,?,?,?,?)",
+                                (symbol, tf, direction, price, reason, ts))
+            await db.commit()
+            print(f"[LOG] Успешно записано в базу данных ({DB_PATH}).")
+    except Exception as db_e:
+        print(f"[CRITICAL ERROR] Сбой записи в базу данных: {db_e}")
+        return # Останавливаем отправку, если запись в БД не удалась
 
-    text = (f"OZ ULTRA PRO 2026 v2.8\n"
+    text = (f"OZ ULTRA PRO 2026 v3.0\n" # Обновление версии
             f"<b>{direction.upper()}</b>\n"
             f"<code>{symbol}</code> | <code>{tf}</code>\n"
             f"Цена: <code>{price:.6f}</code>\n"
@@ -166,120 +176,145 @@ async def send_signal(symbol, tf, direction, price, reason):
 # ========================= СКАНЕР =========================
 async def check_pair(exchange, symbol, tf):
     if not await is_coin_enabled(symbol):
+        print(f"[INFO] {symbol} {tf}: Пропуск (отключен в настройках).")
         return
+    
+    # Логирование: начало проверки
+    print(f"[INFO] Начало проверки: {symbol} {tf}")
+    
     try:
-        # Убедитесь, что лимит данных достаточен для всех EMA (300+ свечей)
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=tf, limit=500)
-        if len(ohlcv) < 300: return
+        if len(ohlcv) < 300: 
+            print(f"[WARNING] {symbol} {tf}: Недостаточно данных ({len(ohlcv)} свечей).")
+            return
 
         df = pd.DataFrame(ohlcv, columns=['ts','open','high','low','close','volume'])
+        
+        # === ДОБАВЛЕНИЕ НОВЫХ ИНДИКАТОРОВ ===
         df['ema34'] = talib.EMA(df['close'], 34)
         df['ema55'] = talib.EMA(df['close'], 55)
         df['ema200'] = talib.EMA(df['close'], 200)
         df['rsi'] = talib.RSI(df['close'], 14)
-        df['atr'] = talib.ATR(df['high'], df['low'], df['close'], 14)
         df['vol_ma20'] = df['volume'].rolling(20).mean()
+        
+        # 1. ADX (Средний Индекс Направления) для силы тренда
+        df['adx'] = talib.ADX(df['high'], df['low'], df['close'], 14)
+        # 2. MFI (Индекс Денежного Потока) для подтверждения импульса
+        df['mfi'] = talib.MFI(df['high'], df['low'], df['close'], df['volume'], 14)
 
         c = df['close'].iloc[-1]
-        prev = df['close'].iloc[-2]
-        rsi = df['rsi'].iloc[-1]
-        vol = df['volume'].iloc[-1]
-        vol_avg = df['vol_ma20'].iloc[-1]
-        atr = df['atr'].iloc[-1] or 0.000001 # Защита от деления на ноль
-
+        
         key = f"{symbol}_{tf}"
         now = datetime.now().timestamp()
 
-        # Условия бычьего тренда
-        trend_bull = (
-            c > df['ema34'].iloc[-1] > df['ema55'].iloc[-1] > df['ema200'].iloc[-1] and
-            df['ema34'].iloc[-1] > df['ema34'].iloc[-3] and # EMA34 растет
-            df['ema55'].iloc[-1] > df['ema55'].iloc[-8] # EMA55 растет
+        # === УЛУЧШЕННОЕ УСЛОВИЕ LONG (Требуется ADX > 25 и MFI фильтр) ===
+        long_cond = (
+            # Основной тренд (Цена выше EMA55)
+            df['close'].iloc[-1] > df['ema55'].iloc[-1] and 
+            # Подтверждение кроссовера (EMA34 выше EMA55)
+            df['ema34'].iloc[-1] > df['ema55'].iloc[-1] and
+            # ФИЛЬТР 1: ADX > 25 (Подтверждение СИЛЫ тренда)
+            df['adx'].iloc[-1] > 25 and
+            # ФИЛЬТР 2: RSI не перекуплен
+            df['rsi'].iloc[-1] < 70 and
+            # ФИЛЬТР 3: MFI не перекуплен (деньги все еще заходят, но не в пике)
+            df['mfi'].iloc[-1] < 70 and
+            # Подтверждение объема
+            df['volume'].iloc[-1] > df['vol_ma20'].iloc[-1] * 1.5
         )
 
-        # Условия на вход в LONG
-        long_cond = trend_bull and \
-                     40 < rsi < 82 and \
-                     vol > vol_avg * (1.7 if tf in ['1h','4h','45m'] else 2.4) and \
-                     c > prev and \
-                     (c - prev) > atr * 0.4 and \
-                     df['low'].iloc[-1] > df['ema34'].iloc[-1] * 0.997 # Защита от пробоя EMA
-
-        # Условия на выход (CLOSE)
+        # === УЛУЧШЕННОЕ УСЛОВИЕ CLOSE (Требуется слабость тренда + слом EMA) ===
         close_cond = (
-            c < df['ema55'].iloc[-1] or # Цена пробила главную линию поддержки
-            (c < df['ema34'].iloc[-1] and rsi > 80) or # Пробила быструю EMA + RSI перегрет
-            (c < prev and (prev - c) > atr * 2.2) # Резкое движение вниз (ATR)
+            # Цена опустилась ниже EMA34
+            df['close'].iloc[-1] < df['ema34'].iloc[-1] and 
+            # EMA34 пересекла EMA55 сверху вниз (Слом тренда)
+            df['ema34'].iloc[-1] < df['ema55'].iloc[-1] and
+            # ФИЛЬТР: ADX < 20 (Тренд ослаб) ИЛИ MFI < 30 (Денежный поток ушел)
+            (df['adx'].iloc[-1] < 20 or df['mfi'].iloc[-1] < 30)
         )
+
 
         cd = COOLDOWNS.get(tf, {'long': 3600, 'close': 1800})
 
-        if long_cond and now - LAST_SIGNAL.get(f"LONG_{key}", 0) > cd['long']:
-            LAST_SIGNAL[f"LONG_{key}"] = now
-            await send_signal(symbol, tf, "LONG", c, "МОЩНЫЙ ТРЕНД + ОБЪЁМ + EMA55")
+        # === ПРОВЕРКА LONG ===
+        if long_cond:
+            if now - LAST_SIGNAL.get(f"LONG_{key}", 0) > cd['long']:
+                LAST_SIGNAL[f"LONG_{key}"] = now
+                await send_signal(symbol, tf, "LONG", c, "СИЛЬНЫЙ ТРЕНД (ADX>25) + EMA55 + ОБЪЁМ")
+            else:
+                print(f"[INFO] {symbol} {tf}: LONG условие выполнено, но сработал КУЛДОУН ({cd['long']}с).")
+        # else:
+            # print(f"[DEBUG] {symbol} {tf}: LONG условие не выполнено.")
 
-        is_close_enabled = await get_close_enabled() # Получаем статус из базы
+
+        # === ПРОВЕРКА CLOSE ===
+        is_close_enabled = await get_close_enabled()
         
-        if close_cond and now - LAST_SIGNAL.get(f"CLOSE_{key}", 0) > cd['close']:
+        if close_cond:
             if not is_close_enabled:
-                 # Игнорируем, если отключено. Отправляем только в телегу для уведомления
+                print(f"[WARNING] {symbol} {tf}: CLOSE условие выполнено, но ГЛОБАЛЬНО ОТКЛЮЧЕНО в панели.")
+                # Отправляем только в телегу для уведомления, не пишем в БД и не отправляем на Webhook
                 await send_telegram(f"<b>CLOSE {symbol}</b> — Игнорируется по настройке админ-панели.")
                 return
 
-            LAST_SIGNAL[f"CLOSE_{key}"] = now
-            await send_signal(symbol, tf, "CLOSE", c, "ТРЕНД СЛОМАН — ФИКСИРУЕМ")
+            if now - LAST_SIGNAL.get(f"CLOSE_{key}", 0) > cd['close']:
+                LAST_SIGNAL[f"CLOSE_{key}"] = now
+                await send_signal(symbol, tf, "CLOSE", c, "ТРЕНД СЛОМАН (ADX/MFI) — ФИКСИРУЕМ")
+            else:
+                print(f"[INFO] {symbol} {tf}: CLOSE условие выполнено, но сработал КУЛДОУН ({cd['close']}с).")
+        # else:
+            # print(f"[DEBUG] {symbol} {tf}: CLOSE условие не выполнено.")
 
     except Exception as e:
-        # Вывод ошибки в консоль, чтобы не прерывать сканер
-        print(f"[Ошибка] {symbol} {tf}: {e}")
+        # Логирование: Вывод ошибки при обработке
+        print(f"[ОШИБКА] {symbol} {tf}: {e}")
 
 async def scanner_background():
-    # Настройка CCXT для Futures
     ex = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
-    await send_telegram("OZ SCANNER ULTRA PRO 2026 v2.8 — ЗАПУЩЕН\nК миллиардам!")
+    await send_telegram("OZ SCANNER ULTRA PRO 2026 v3.0 — ЗАПУЩЕН. УЛУЧШЕННЫЕ ФИЛЬТРЫ.") # Обновление версии
     
     while True:
+        # Логирование: Сердцебиение сканера
+        current_time = datetime.now().strftime("%H:%M:%S")
+        print(f"\n[SCANNER HEARTBEAT] Запуск цикла проверки. Время: {current_time}")
+        
         tasks = []
         for s in ALL_SYMBOLS:
-            if await is_coin_enabled(s):
-                tf = await get_tf_for_coin(s)
-                tasks.append(check_pair(ex, s, tf))
+            tf = await get_tf_for_coin(s)
+            tasks.append(check_pair(ex, s, tf))
         
-        # Запускаем все проверки параллельно
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
             
-        await asyncio.sleep(18) # Пауза между циклами
+        await asyncio.sleep(18)
 
 # ========================= ВЕБ-ПАНЕЛЬ =========================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Инициализация базы данных и запуск фоновой задачи
     await init_db()
     asyncio.create_task(scanner_background())
-    yield # Приложение готово к приему запросов
+    yield
 
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%"><h1>OZ ULTRA PRO 2026 v2.8</h1><form action="/login" method="post"><input type="password" name="password" placeholder="Пароль" style="font-size:24px;padding:12px;width:300px"><br><br><button type="submit" style="font-size:24px;padding:12px 40px">ВОЙТИ</button></form></body></html>'
+    return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%"><h1>OZ ULTRA PRO 2026 v3.0</h1><form action="/login" method="post"><input type="password" name="password" placeholder="Пароль" style="font-size:24px;padding:12px;width:300px"><br><br><button type="submit" style="font-size:24px;padding:12px 40px">ВОЙТИ</button></form></body></html>'
 
 @app.post("/login")
 async def login(password: str = Form(...)):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT value FROM settings WHERE key='password'") as cur:
             row = await cur.fetchone()
-            correct_password = row[0] if row else "777" # Fallback
+            correct_password = row[0] if row else "777"
             
     if password == correct_password:
-        # В реальной жизни здесь нужна сессия/токен, но для простоты перенаправляем
         return RedirectResponse("/panel", status_code=303)
     return HTMLResponse("<h1 style='color:red; background:#000'>НЕПРАВИЛЬНЫЙ ПАРОЛЬ</h1>")
 
 @app.get("/panel", response_class=HTMLResponse)
 async def panel():
-    html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:3;text-align:center'>OZ ULTRA PRO 2026 v2.8 — УПРАВЛЕНИЕ\n\n"
+    html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:3;text-align:center'>OZ ULTRA PRO 2026 v3.0 — УПРАВЛЕНИЕ\n\n" # Обновление версии
     
     # Секция управления монетами
     for symbol in ALL_SYMBOLS:
@@ -289,7 +324,6 @@ async def panel():
         current_tf = await get_tf_for_coin(symbol)
         safe = symbol.replace("/", "_")
         
-        # Обновленная, более понятная кнопка-переключатель
         toggle_label = "ОТКЛЮЧИТЬ" if is_enabled else "ВКЛЮЧИТЬ"
         
         html += f"<b style='color:{color}'>{symbol}</b> — <b>{enabled_status}</b> <a href='/toggle/{safe}'>[{toggle_label}]</a> ТФ: <b>{current_tf}</b>\n"
@@ -319,7 +353,6 @@ async def toggle_coin(symbol: str):
     await set_coin_enabled(symbol, 0 if cur else 1)
     return RedirectResponse("/panel", status_code=303)
 
-# НОВЫЙ МАРШРУТ: Переключение глобального статуса CLOSE
 @app.get("/toggle-close")
 async def toggle_close():
     cur = await get_close_enabled()
