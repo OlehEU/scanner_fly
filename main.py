@@ -1,4 +1,4 @@
-# main.py — OZ SCANNER ULTRA PRO 2026 v2.8 | Финальная версия 2025
+# main.py — OZ SCANNER ULTRA PRO 2026 v2.9 | Финальная версия 2025
 import ccxt.async_support as ccxt
 import asyncio
 import pandas as pd
@@ -26,9 +26,9 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://bot-fly-oz.fly.dev/webhook")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") 
 
 # ========================= НАСТРОЙКИ =========================
-# ДОБАВЛЕНО: ETH/USDT и BNB/USDT
+# АКТУАЛЬНЫЙ СПИСОК: ETH/USDT, BNB/USDT, DOGE/USDT, XRP/USDT, SOL/USDT, FARTCOIN/USDT
 ALL_SYMBOLS = ["ETH/USDT", "BNB/USDT", "DOGE/USDT", "XRP/USDT", "SOL/USDT", "FARTCOIN/USDT"]
-# ИСПРАВЛЕНО: Убран '45m' из списка доступных таймфреймов
+# АКТУАЛЬНЫЕ ТФ: Удален '45m'
 ALL_TFS = ['1m', '5m', '30m', '1h', '4h']
 DB_PATH = "oz_ultra.db"
 
@@ -37,7 +37,6 @@ COOLDOWNS = {
     '1m': {'long': 240, 'close': 180},
     '5m': {'long': 480, 'close': 300},
     '30m': {'long': 1200, 'close': 600},
-    # '45m': {'long': 1800, 'close': 900},  # Теперь не используется
     '1h': {'long': 3600, 'close': 1800},
     '4h': {'long': 10800, 'close': 5400},
 }
@@ -60,6 +59,8 @@ async def init_db():
             );
         ''')
         await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('password','777')") 
+        # НОВОЕ: Настройка для глобального включения/выключения сигналов CLOSE
+        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('close_signals_enabled','1')")
         
         for s in ALL_SYMBOLS:
             await db.execute(
@@ -88,6 +89,22 @@ async def set_coin_enabled(symbol: str, enabled: int):
 async def set_tf_for_coin(symbol: str, tf: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE coin_settings SET tf=? WHERE symbol=?", (tf, symbol))
+        await db.commit()
+
+# НОВАЯ ФУНКЦИЯ: Получение статуса сигналов CLOSE
+async def get_close_signals_status() -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM settings WHERE key='close_signals_enabled'") as cur:
+            row = await cur.fetchone()
+            # По умолчанию включены, если нет записи
+            return row[0] == '1' if row and row[0] in ('0', '1') else True 
+
+# НОВАЯ ФУНКЦИЯ: Переключение статуса сигналов CLOSE
+async def toggle_close_signals_status():
+    current_status = await get_close_signals_status()
+    new_status = '0' if current_status else '1'
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE settings SET value=? WHERE key='close_signals_enabled'", (new_status,))
         await db.commit()
 
 # ========================= ОТПРАВКА =========================
@@ -185,7 +202,7 @@ async def check_pair(exchange, symbol, tf):
 
         long_cond = trend_bull and \
                     40 < rsi < 82 and \
-                    vol > vol_avg * (1.7 if tf in ['1h','4h','45m'] else 2.4) and \
+                    vol > vol_avg * (1.7 if tf in ['1h','4h'] else 2.4) and \
                     c > prev and \
                     (c - prev) > atr * 0.4 and \
                     df['low'].iloc[-1] > df['ema34'].iloc[-1] * 0.997
@@ -196,14 +213,15 @@ async def check_pair(exchange, symbol, tf):
             (c < prev and (prev - c) > atr * 2.2)
         )
 
-        # Обратите внимание: COOLDOWNS также изменились выше, чтобы соответствовать ALL_TFS
         cd = COOLDOWNS.get(tf, {'long': 3600, 'close': 1800})
 
         if long_cond and now - LAST_SIGNAL.get(f"LONG_{key}", 0) > cd['long']:
             LAST_SIGNAL[f"LONG_{key}"] = now
             await send_signal(symbol, tf, "LONG", c, "МОЩНЫЙ ТРЕНД + ОБЪЁМ + EMA55")
 
-        if close_cond and now - LAST_SIGNAL.get(f"CLOSE_{key}", 0) > cd['close']:
+        # ИСПОЛЬЗУЕМ НОВЫЙ ГЛОБАЛЬНЫЙ ПЕРЕКЛЮЧАТЕЛЬ ДЛЯ CLOSE
+        if await get_close_signals_status() and \
+           close_cond and now - LAST_SIGNAL.get(f"CLOSE_{key}", 0) > cd['close']:
             LAST_SIGNAL[f"CLOSE_{key}"] = now
             await send_signal(symbol, tf, "CLOSE", c, "ТРЕНД СЛОМАН — ФИКСИРУЕМ")
 
@@ -228,6 +246,13 @@ async def scanner_background():
         await asyncio.sleep(18)
 
 # ========================= ВЕБ-ПАНЕЛЬ =========================
+# НОВЫЙ ЭНДПОИНТ ДЛЯ ПЕРЕКЛЮЧЕНИЯ ГЛОБАЛЬНОГО CLOSE
+@app.get("/toggle_close")
+async def toggle_close():
+    await toggle_close_signals_status()
+    return RedirectResponse("/panel")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -255,19 +280,31 @@ async def login(password: str = Form(...)):
 
 @app.get("/panel", response_class=HTMLResponse)
 async def panel():
+    is_close_enabled = await get_close_signals_status()
+    close_status_text = "ВКЛЮЧЕНЫ" if is_close_enabled else "ВЫКЛЮЧЕНЫ"
+    close_color = "#0f0" if is_close_enabled else "#f00"
+
     html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:3;text-align:center'>OZ ULTRA PRO 2026 v2.8 — УПРАВЛЕНИЕ\n\n"
+    
+    # НОВОЕ: Глобальный переключатель для CLOSE сигналов
+    html += f"СИГНАЛЫ CLOSE: <b style='color:{close_color}'>{close_status_text}</b> <a href='/toggle_close'>[ТОГГЛ CLOSE]</a>\n\n"
+
     for symbol in ALL_SYMBOLS:
-        enabled = "ВКЛ" if await is_coin_enabled(symbol) else "ВЫКЛ"
-        color = "#0f0" if await is_coin_enabled(symbol) else "#800"
+        is_coin_enabled_status = await is_coin_enabled(symbol)
+        enabled_text = "ВКЛЮЧЕНА" if is_coin_enabled_status else "ВЫКЛЮЧЕНА"
+        color = "#0f0" if is_coin_enabled_status else "#800"
         current_tf = await get_tf_for_coin(symbol)
         safe = symbol.replace("/", "_")
-        html += f"<b style='color:{color}'>{symbol}</b> — <b>{enabled}</b> <a href='/toggle/{safe}'>[ТОГГЛ]</a> ТФ: <b>{current_tf}</b>\n"
+        
+        # Обновленный вывод для монет
+        html += f"<b style='color:{color}'>{symbol}</b> — <b>{enabled_text}</b> <a href='/toggle/{safe}'>[ТОГГЛ]</a> ТФ: <b>{current_tf}</b>\n"
         for tf in ALL_TFS:
             if tf == current_tf:
                 html += f" <u>[{tf}]</u>"
             else:
                 html += f" <a href='/set/{safe}/{tf}'>[{tf}]</a>"
         html += "\n\n"
+        
     html += f"<a href='/signals'>СИГНАЛЫ</a>   <a href='/'>ВЫХОД</a></pre>"
     return HTMLResponse(html)
 
