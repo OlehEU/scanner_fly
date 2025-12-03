@@ -246,13 +246,6 @@ async def scanner_background():
         await asyncio.sleep(18)
 
 # ========================= ВЕБ-ПАНЕЛЬ =========================
-# НОВЫЙ ЭНДПОИНТ ДЛЯ ПЕРЕКЛЮЧЕНИЯ ГЛОБАЛЬНОГО CLOSE
-@app.get("/toggle_close")
-async def toggle_close():
-    await toggle_close_signals_status()
-    return RedirectResponse("/panel")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -260,7 +253,14 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(scanner_background())
     yield 
 
+# КОРРЕКЦИЯ: Инициализация 'app' должна быть ДО использования декораторов @app.get!
 app = FastAPI(lifespan=lifespan)
+
+# НОВЫЙ ЭНДПОИНТ ДЛЯ ПЕРЕКЛЮЧЕНИЯ ГЛОБАЛЬНОГО CLOSE
+@app.get("/toggle_close")
+async def toggle_close():
+    await toggle_close_signals_status()
+    return RedirectResponse("/panel")
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
