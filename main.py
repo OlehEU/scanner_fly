@@ -1,4 +1,4 @@
-# main.py — OZ SCANNER ULTRA PRO 2026 v2.9 | Финальная версия 2025
+# main.py — OZ Scanner Ultra Pro 2026 v3 | Финальная версия 2025
 import ccxt.async_support as ccxt
 import asyncio
 import pandas as pd
@@ -286,8 +286,8 @@ async def panel():
 
     html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:3;text-align:center'>OZ ULTRA PRO 2026 v2.8 — УПРАВЛЕНИЕ\n\n"
     
-    # НОВОЕ: Глобальный переключатель для CLOSE сигналов
-    html += f"СИГНАЛЫ CLOSE: <b style='color:{close_color}'>{close_status_text}</b> <a href='/toggle_close'>[ТОГГЛ CLOSE]</a>\n\n"
+    # Глобальный переключатель для CLOSE сигналов: [ПЕРЕКЛЮЧИТЬ]
+    html += f"СИГНАЛЫ CLOSE: <b style='color:{close_color}'>{close_status_text}</b> <a href='/toggle_close'>[ПЕРЕКЛЮЧИТЬ]</a>\n\n"
 
     for symbol in ALL_SYMBOLS:
         is_coin_enabled_status = await is_coin_enabled(symbol)
@@ -296,8 +296,11 @@ async def panel():
         current_tf = await get_tf_for_coin(symbol)
         safe = symbol.replace("/", "_")
         
+        # Динамическая кнопка: [ВЫКЛЮЧИТЬ] или [ВКЛЮЧИТЬ]
+        toggle_action_text = "ВЫКЛЮЧИТЬ" if is_coin_enabled_status else "ВКЛЮЧИТЬ"
+
         # Обновленный вывод для монет
-        html += f"<b style='color:{color}'>{symbol}</b> — <b>{enabled_text}</b> <a href='/toggle/{safe}'>[ТОГГЛ]</a> ТФ: <b>{current_tf}</b>\n"
+        html += f"<b style='color:{color}'>{symbol}</b> — <b>{enabled_text}</b> <a href='/toggle/{safe}'>[{toggle_action_text}]</a> ТФ: <b>{current_tf}</b>\n"
         for tf in ALL_TFS:
             if tf == current_tf:
                 html += f" <u>[{tf}]</u>"
