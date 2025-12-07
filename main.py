@@ -43,12 +43,13 @@ ALL_TFS = ['1m', '5m', '30m', '1h', '4h']
 DB_PATH = "oz_ultra.db"
 
 # Кулдауны под каждый таймфрейм (в секундах)
+# ДОБАВЛЕНЫ: 'short' и 'close_short' для контроля частоты шортовых сигналов
 COOLDOWNS = {
-    '1m': {'long': 240, 'close': 180},
-    '5m': {'long': 480, 'close': 300},
-    '30m': {'long': 1200, 'close': 600},
-    '1h': {'long': 3600, 'close': 1800},
-    '4h': {'long': 10800, 'close': 5400},
+    '1m': {'long': 240, 'close': 180, 'short': 240, 'close_short': 180},
+    '5m': {'long': 480, 'close': 300, 'short': 480, 'close_short': 300},
+    '30m': {'long': 1200, 'close': 600, 'short': 1200, 'close_short': 600},
+    '1h': {'long': 3600, 'close': 1800, 'short': 3600, 'close_short': 1800},
+    '4h': {'long': 10800, 'close': 5400, 'short': 10800, 'close_short': 5400},
 }
 
 LAST_SIGNAL = {} # {"LONG_DOGE/USDT_45m": timestamp, ...}
@@ -69,8 +70,12 @@ async def init_db():
             );
         ''')
         await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('password','777')") 
-        # НОВОЕ: Настройка для глобального включения/выключения сигналов CLOSE
-        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('close_signals_enabled','1')")
+        
+        # НОВЫЕ ГЛОБАЛЬНЫЕ НАСТРОЙКИ ДЛЯ ЧЕТЫРЕХ ТИПОВ СИГНАЛОВ
+        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('long_entry_enabled','1')")
+        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('short_entry_enabled','1')")
+        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('close_long_enabled','1')")
+        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('close_short_enabled','1')")
         
         # Обновление настроек для ВСЕХ символов
         for s in ALL_SYMBOLS:
@@ -102,20 +107,20 @@ async def set_tf_for_coin(symbol: str, tf: str):
         await db.execute("UPDATE coin_settings SET tf=? WHERE symbol=?", (tf, symbol))
         await db.commit()
 
-# НОВАЯ ФУНКЦИЯ: Получение статуса сигналов CLOSE
-async def get_close_signals_status() -> bool:
+# УНИВЕРСАЛЬНЫЕ ФУНКЦИИ ДЛЯ ПОЛУЧЕНИЯ И ПЕРЕКЛЮЧЕНИЯ НАСТРОЕК
+async def get_setting(key: str) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT value FROM settings WHERE key='close_signals_enabled'") as cur:
+        async with db.execute("SELECT value FROM settings WHERE key=?", (key,)) as cur:
             row = await cur.fetchone()
-            # По умолчанию включены, если нет записи
+            # По умолчанию включены ('1')
             return row[0] == '1' if row and row[0] in ('0', '1') else True 
 
-# НОВАЯ ФУНКЦИЯ: Переключение статуса сигналов CLOSE
-async def toggle_close_signals_status():
-    current_status = await get_close_signals_status()
+async def toggle_setting(key: str):
+    current_status = await get_setting(key)
     new_status = '0' if current_status else '1'
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE settings SET value=? WHERE key='close_signals_enabled'", (new_status,))
+        # Используем INSERT OR IGNORE на случай, если ключа не было (хотя init_db должен был его добавить)
+        await db.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", (key, new_status))
         await db.commit()
 
 # ========================= ОТПРАВКА =========================
@@ -205,12 +210,21 @@ async def check_pair(exchange, symbol, tf):
         key = f"{symbol}_{tf}"
         now = datetime.now().timestamp()
 
+        # --- ТРЕНДОВЫЕ ФИЛЬТРЫ ---
         trend_bull = (
             c > df['ema34'].iloc[-1] > df['ema55'].iloc[-1] > df['ema200'].iloc[-1] and
             df['ema34'].iloc[-1] > df['ema34'].iloc[-3] and
             df['ema55'].iloc[-1] > df['ema55'].iloc[-8]
         )
+        
+        # НОВОЕ: МЕДВЕЖИЙ ТРЕНД (зеркальное отражение бычьего)
+        trend_bear = (
+            c < df['ema34'].iloc[-1] < df['ema55'].iloc[-1] < df['ema200'].iloc[-1] and
+            df['ema34'].iloc[-1] < df['ema34'].iloc[-3] and
+            df['ema55'].iloc[-1] < df['ema55'].iloc[-8]
+        )
 
+        # --- УСЛОВИЯ LONG-СИГНАЛОВ ---
         long_cond = trend_bull and \
                      40 < rsi < 82 and \
                      vol > vol_avg * (1.7 if tf in ['1h','4h'] else 2.4) and \
@@ -218,23 +232,53 @@ async def check_pair(exchange, symbol, tf):
                      (c - prev) > atr * 0.4 and \
                      df['low'].iloc[-1] > df['ema34'].iloc[-1] * 0.997
 
-        close_cond = (
+        # --- УСЛОВИЯ SHORT-СИГНАЛОВ (НОВОЕ) ---
+        short_cond = trend_bear and \
+                     18 < rsi < 60 and \
+                     vol > vol_avg * (1.7 if tf in ['1h','4h'] else 2.4) and \
+                     c < prev and \
+                     (prev - c) > atr * 0.4 and \
+                     df['high'].iloc[-1] < df['ema34'].iloc[-1] * 1.003
+        
+        # --- УСЛОВИЯ CLOSE-LONG-СИГНАЛОВ ---
+        close_long_cond = (
             c < df['ema55'].iloc[-1] or
             (c < df['ema34'].iloc[-1] and rsi > 80) or
             (c < prev and (prev - c) > atr * 2.2)
         )
+        
+        # --- УСЛОВИЯ CLOSE-SHORT-СИГНАЛОВ (НОВОЕ) ---
+        close_short_cond = (
+            c > df['ema55'].iloc[-1] or
+            (c > df['ema34'].iloc[-1] and rsi < 20) or
+            (c > prev and (c - prev) > atr * 2.2)
+        )
 
-        cd = COOLDOWNS.get(tf, {'long': 3600, 'close': 1800})
+        cd = COOLDOWNS.get(tf, {'long': 3600, 'close': 1800, 'short': 3600, 'close_short': 1800})
 
-        if long_cond and now - LAST_SIGNAL.get(f"LONG_{key}", 0) > cd['long']:
+        # 1. LONG ENTRY SIGNAL
+        if await get_setting('long_entry_enabled') and long_cond and \
+           now - LAST_SIGNAL.get(f"LONG_{key}", 0) > cd['long']:
             LAST_SIGNAL[f"LONG_{key}"] = now
             await send_signal(symbol, tf, "LONG", c, "МОЩНЫЙ ТРЕНД + ОБЪЁМ + EMA55")
+            
+        # 2. SHORT ENTRY SIGNAL
+        if await get_setting('short_entry_enabled') and short_cond and \
+           now - LAST_SIGNAL.get(f"SHORT_{key}", 0) > cd['short']:
+            LAST_SIGNAL[f"SHORT_{key}"] = now
+            await send_signal(symbol, tf, "SHORT", c, "СЛАБЫЙ ТРЕНД + ОБЪЁМ + EMA55")
 
-        # ИСПОЛЬЗУЕМ НОВЫЙ ГЛОБАЛЬНЫЙ ПЕРЕКЛЮЧАТЕЛЬ ДЛЯ CLOSE
-        if await get_close_signals_status() and \
-           close_cond and now - LAST_SIGNAL.get(f"CLOSE_{key}", 0) > cd['close']:
-            LAST_SIGNAL[f"CLOSE_{key}"] = now
-            await send_signal(symbol, tf, "CLOSE", c, "ТРЕНД СЛОМАН — ФИКСИРУЕМ")
+        # 3. CLOSE LONG SIGNAL
+        if await get_setting('close_long_enabled') and close_long_cond and \
+           now - LAST_SIGNAL.get(f"CLOSE_LONG_{key}", 0) > cd['close']:
+            LAST_SIGNAL[f"CLOSE_LONG_{key}"] = now
+            await send_signal(symbol, tf, "CLOSE_LONG", c, "ТРЕНД LONG СЛОМАН — ФИКСИРУЕМ")
+            
+        # 4. CLOSE SHORT SIGNAL
+        if await get_setting('close_short_enabled') and close_short_cond and \
+           now - LAST_SIGNAL.get(f"CLOSE_SHORT_{key}", 0) > cd['close_short']:
+            LAST_SIGNAL[f"CLOSE_SHORT_{key}"] = now
+            await send_signal(symbol, tf, "CLOSE_SHORT", c, "ТРЕНД SHORT СЛОМАН — ФИКСИРУЕМ")
 
     except Exception as e:
         print(f"[Ошибка] {symbol} {tf}: {e}")
@@ -242,7 +286,8 @@ async def check_pair(exchange, symbol, tf):
 async def scanner_background():
     # Инициализация ccxt с ограничением скорости
     ex = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
-    await send_telegram("OZ SCANNER ULTRA PRO 2026 v2.8 — ЗАПУЩЕН\nКонфигурация: FARTCOIN + 45m + ТЕЛЕГА + ХУК\nК миллиардам!")
+    # Обновленное сообщение при запуске
+    await send_telegram("OZ SCANNER ULTRA PRO 2026 v2.9 (4x) — ЗАПУЩЕН\nКонфигурация: FARTCOIN + 45m + ТЕЛЕГА + ХУК\nК миллиардам!")
     
     while True:
         tasks = []
@@ -267,15 +312,16 @@ async def lifespan(app: FastAPI):
 # КОРРЕКЦИЯ: Инициализация 'app' должна быть ДО использования декораторов @app.get!
 app = FastAPI(lifespan=lifespan)
 
-# НОВЫЙ ЭНДПОИНТ ДЛЯ ПЕРЕКЛЮЧЕНИЯ ГЛОБАЛЬНОГО CLOSE
-@app.get("/toggle_close")
-async def toggle_close():
-    await toggle_close_signals_status()
+# НОВЫЙ УНИВЕРСАЛЬНЫЙ ЭНДПОИНТ ДЛЯ ПЕРЕКЛЮЧЕНИЯ ГЛОБАЛЬНЫХ НАСТРОЕК
+@app.get("/toggle_setting/{key}")
+async def toggle_setting_endpoint(key: str):
+    if key in ['long_entry_enabled', 'short_entry_enabled', 'close_long_enabled', 'close_short_enabled']:
+        await toggle_setting(key)
     return RedirectResponse("/panel")
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%"><h1>OZ ULTRA PRO 2026 v2.8</h1><form action="/login" method="post"><input type="password" name="password" placeholder="Пароль" style="font-size:24px;padding:12px;width:300px"><br><br><button type="submit" style="font-size:24px;padding:12px 40px">ВОЙТИ</button></form></body></html>'
+    return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%"><h1>OZ ULTRA PRO 2026 v2.9 (4x)</h1><form action="/login" method="post"><input type="password" name="password" placeholder="Пароль" style="font-size:24px;padding:12px;width:300px"><br><br><button type="submit" style="font-size:24px;padding:12px 40px">ВОЙТИ</button></form></body></html>'
 
 @app.post("/login")
 async def login(password: str = Form(...)):
@@ -291,15 +337,27 @@ async def login(password: str = Form(...)):
 
 @app.get("/panel", response_class=HTMLResponse)
 async def panel():
-    is_close_enabled = await get_close_signals_status()
-    close_status_text = "ВКЛЮЧЕНЫ" if is_close_enabled else "ВЫКЛЮЧЕНЫ"
-    close_color = "#0f0" if is_close_enabled else "#f00"
-
-    html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:3;text-align:center'>OZ ULTRA PRO 2026 v2.8 — УПРАВЛЕНИЕ\n\n"
     
-    # Глобальный переключатель для CLOSE сигналов: [ПЕРЕКЛЮЧИТЬ]
-    html += f"СИГНАЛЫ CLOSE: <b style='color:{close_color}'>{close_status_text}</b> <a href='/toggle_close'>[ПЕРЕКЛЮЧИТЬ]</a>\n\n"
+    settings_map = {
+        'long_entry_enabled': 'СИГНАЛЫ LONG',
+        'short_entry_enabled': 'СИГНАЛЫ SHORT',
+        'close_long_enabled': 'СИГНАЛЫ CLOSE LONG',
+        'close_short_enabled': 'СИГНАЛЫ CLOSE SHORT',
+    }
 
+    html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:1.8;text-align:center'>OZ ULTRA PRO 2026 v2.9 (4x) — УПРАВЛЕНИЕ\n\n"
+    
+    # БЛОК ГЛОБАЛЬНЫХ ПЕРЕКЛЮЧАТЕЛЕЙ
+    html += "<b style='color:#0ff'>--- ГЛОБАЛЬНЫЙ КОНТРОЛЬ СИГНАЛОВ ---</b>\n"
+    for key, label in settings_map.items():
+        is_enabled = await get_setting(key)
+        status_text = "ВКЛЮЧЕНЫ" if is_enabled else "ВЫКЛЮЧЕНЫ"
+        color = "#0f0" if is_enabled else "#f00"
+        
+        html += f"{label}: <b style='color:{color}'>{status_text}</b> <a href='/toggle_setting/{key}'>[ПЕРЕКЛЮЧИТЬ]</a>\n"
+    html += "<b style='color:#0ff'>-------------------------------------</b>\n\n"
+    
+    # БЛОК УПРАВЛЕНИЯ ПАРАМИ
     for symbol in ALL_SYMBOLS:
         is_coin_enabled_status = await is_coin_enabled(symbol)
         enabled_text = "ВКЛЮЧЕНА" if is_coin_enabled_status else "ВЫКЛЮЧЕНА"
@@ -349,7 +407,7 @@ async def signals():
             
     t = "<table border=1 style='color:#0f0;background:#000;width:95%;margin:auto;font-size:18px;text-align:center'><tr><th>Монета</th><th>ТФ</th><th>Сигнал</th><th>Цена</th><th>Причина</th><th>Время</th></tr>"
     for r in rows:
-        color = "#0f0" if r[2] == "LONG" else "#f00"
+        color = "#0f0" if r[2] == "LONG" else "#f00" if r[2] == "SHORT" else "#ccc"
         t += f"<tr><td>{r[0]}</td><td>{r[1]}</td><td style='color:{color}'><b>{r[2]}</b></td><td>{r[3]:.6f}</td><td>{r[4]}</td><td>{r[5]}</td></tr>"
     t += "</table><br><a href='/panel' style='display:block;margin-top:20px;color:#0f0'>НАЗАД</a>"
     return HTMLResponse(f"<body style='background:#000;color:#0f0;font-family:monospace'>{t}</body>")
