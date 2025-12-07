@@ -26,8 +26,18 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://bot-fly-oz.fly.dev/webhook")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") 
 
 # ========================= НАСТРОЙКИ =========================
-# АКТУАЛЬНЫЙ СПИСОК: ETH/USDT, BNB/USDT, DOGE/USDT, XRP/USDT, SOL/USDT, FARTCOIN/USDT
-ALL_SYMBOLS = ["ETH/USDT", "BNB/USDT", "DOGE/USDT", "XRP/USDT", "SOL/USDT", "FARTCOIN/USDT"]
+# АКТУАЛЬНЫЙ СПИСОК (Обновлен: 23 пары, включая все запрошенные)
+ALL_SYMBOLS = [
+    # Мемкоины и токены с высокой точностью (0 знаков после запятой)
+    "DOGE/USDT", "SHIB/USDT", "PEPE/USDT", "1000PEPE/USDT", "BONK/USDT", 
+    "FLOKI/USDT", "1000SATS/USDT", "FARTCOIN/USDT", "LUNC/USDT", "BTT/USDT", 
+    "MASK/USDT",
+    # Основные и Layer 1/2 монеты
+    "ETH/USDT", "BNB/USDT", "SOL/USDT", "ADA/USDT", "TRX/USDT", "MATIC/USDT", 
+    "DOT/USDT", "ATOM/USDT", "LINK/USDT", "AVAX/USDT", "NEAR/USDT", 
+    "XRP/USDT" 
+]
+
 # АКТУАЛЬНЫЕ ТФ: Удален '45m'
 ALL_TFS = ['1m', '5m', '30m', '1h', '4h']
 DB_PATH = "oz_ultra.db"
@@ -41,7 +51,7 @@ COOLDOWNS = {
     '4h': {'long': 10800, 'close': 5400},
 }
 
-LAST_SIGNAL = {}  # {"LONG_DOGE/USDT_45m": timestamp, ...}
+LAST_SIGNAL = {} # {"LONG_DOGE/USDT_45m": timestamp, ...}
 
 # ========================= БАЗА =========================
 async def init_db():
@@ -62,6 +72,7 @@ async def init_db():
         # НОВОЕ: Настройка для глобального включения/выключения сигналов CLOSE
         await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('close_signals_enabled','1')")
         
+        # Обновление настроек для ВСЕХ символов
         for s in ALL_SYMBOLS:
             await db.execute(
                 "INSERT OR IGNORE INTO coin_settings (symbol, tf, enabled) VALUES (?, '1h', 1)",
@@ -155,7 +166,7 @@ async def send_signal(symbol, tf, direction, price, reason):
     ts = int(datetime.now().timestamp() * 1000)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT INTO signals (symbol,tf,direction,price,reason,ts) VALUES (?,?,?,?,?,?)",
-                         (symbol, tf, direction, price, reason, ts))
+                             (symbol, tf, direction, price, reason, ts))
         await db.commit()
 
     text = (f"OZ ULTRA PRO 2026 v2.8\n"
@@ -201,11 +212,11 @@ async def check_pair(exchange, symbol, tf):
         )
 
         long_cond = trend_bull and \
-                    40 < rsi < 82 and \
-                    vol > vol_avg * (1.7 if tf in ['1h','4h'] else 2.4) and \
-                    c > prev and \
-                    (c - prev) > atr * 0.4 and \
-                    df['low'].iloc[-1] > df['ema34'].iloc[-1] * 0.997
+                     40 < rsi < 82 and \
+                     vol > vol_avg * (1.7 if tf in ['1h','4h'] else 2.4) and \
+                     c > prev and \
+                     (c - prev) > atr * 0.4 and \
+                     df['low'].iloc[-1] > df['ema34'].iloc[-1] * 0.997
 
         close_cond = (
             c < df['ema55'].iloc[-1] or
@@ -308,7 +319,7 @@ async def panel():
                 html += f" <a href='/set/{safe}/{tf}'>[{tf}]</a>"
         html += "\n\n"
         
-    html += f"<a href='/signals'>СИГНАЛЫ</a>   <a href='/'>ВЫХОД</a></pre>"
+    html += f"<a href='/signals'>СИГНАЛЫ</a>  <a href='/'>ВЫХОД</a></pre>"
     return HTMLResponse(html)
 
 @app.get("/toggle/{symbol}")
