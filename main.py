@@ -71,16 +71,16 @@ async def init_db():
         ''')
         await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('password','777')") 
         
-        # НОВЫЕ ГЛОБАЛЬНЫЕ НАСТРОЙКИ ДЛЯ ЧЕТЫРЕХ ТИПОВ СИГНАЛОВ
-        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('long_entry_enabled','1')")
-        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('short_entry_enabled','1')")
-        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('close_long_enabled','1')")
-        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('close_short_enabled','1')")
+        # ИЗМЕНЕНИЕ: Установка по умолчанию для всех глобальных сигналов на '0' (ВЫКЛЮЧЕНЫ)
+        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('long_entry_enabled','0')")
+        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('short_entry_enabled','0')")
+        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('close_long_enabled','0')")
+        await db.execute("INSERT OR IGNORE INTO settings (key,value) VALUES ('close_short_enabled','0')")
         
-        # Обновление настроек для ВСЕХ символов
+        # ИЗМЕНЕНИЕ: Установка по умолчанию для каждой монеты на 0 (ВЫКЛЮЧЕНА)
         for s in ALL_SYMBOLS:
             await db.execute(
-                "INSERT OR IGNORE INTO coin_settings (symbol, tf, enabled) VALUES (?, '1h', 1)",
+                "INSERT OR IGNORE INTO coin_settings (symbol, tf, enabled) VALUES (?, '1h', 0)",
                 (s,)
             )
         await db.commit()
@@ -89,7 +89,9 @@ async def is_coin_enabled(symbol: str) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT enabled FROM coin_settings WHERE symbol=?", (symbol,)) as cur:
             row = await cur.fetchone()
-            return bool(row[0]) if row else True
+            # ПРОВЕРКА: Если запись существует, возвращаем ее статус (0 или 1). 
+            # Если по какой-то причине записи нет, по умолчанию True, чтобы избежать ошибок.
+            return bool(row[0]) if row and row[0] in (0, 1) else True 
 
 async def get_tf_for_coin(symbol: str) -> str:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -112,8 +114,8 @@ async def get_setting(key: str) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT value FROM settings WHERE key=?", (key,)) as cur:
             row = await cur.fetchone()
-            # По умолчанию включены ('1')
-            return row[0] == '1' if row and row[0] in ('0', '1') else True 
+            # ПРОВЕРКА: По умолчанию ВЫКЛЮЧЕНЫ ('0') после обновления init_db
+            return row[0] == '1' if row and row[0] in ('0', '1') else False 
 
 async def toggle_setting(key: str):
     current_status = await get_setting(key)
@@ -258,25 +260,25 @@ async def check_pair(exchange, symbol, tf):
 
         # 1. LONG ENTRY SIGNAL
         if await get_setting('long_entry_enabled') and long_cond and \
-           now - LAST_SIGNAL.get(f"LONG_{key}", 0) > cd['long']:
+            now - LAST_SIGNAL.get(f"LONG_{key}", 0) > cd['long']:
             LAST_SIGNAL[f"LONG_{key}"] = now
             await send_signal(symbol, tf, "LONG", c, "МОЩНЫЙ ТРЕНД + ОБЪЁМ + EMA55")
             
         # 2. SHORT ENTRY SIGNAL
         if await get_setting('short_entry_enabled') and short_cond and \
-           now - LAST_SIGNAL.get(f"SHORT_{key}", 0) > cd['short']:
+            now - LAST_SIGNAL.get(f"SHORT_{key}", 0) > cd['short']:
             LAST_SIGNAL[f"SHORT_{key}"] = now
             await send_signal(symbol, tf, "SHORT", c, "СЛАБЫЙ ТРЕНД + ОБЪЁМ + EMA55")
 
         # 3. CLOSE LONG SIGNAL
         if await get_setting('close_long_enabled') and close_long_cond and \
-           now - LAST_SIGNAL.get(f"CLOSE_LONG_{key}", 0) > cd['close']:
+            now - LAST_SIGNAL.get(f"CLOSE_LONG_{key}", 0) > cd['close']:
             LAST_SIGNAL[f"CLOSE_LONG_{key}"] = now
             await send_signal(symbol, tf, "CLOSE_LONG", c, "ТРЕНД LONG СЛОМАН — ФИКСИРУЕМ")
             
         # 4. CLOSE SHORT SIGNAL
         if await get_setting('close_short_enabled') and close_short_cond and \
-           now - LAST_SIGNAL.get(f"CLOSE_SHORT_{key}", 0) > cd['close_short']:
+            now - LAST_SIGNAL.get(f"CLOSE_SHORT_{key}", 0) > cd['close_short']:
             LAST_SIGNAL[f"CLOSE_SHORT_{key}"] = now
             await send_signal(symbol, tf, "CLOSE_SHORT", c, "ТРЕНД SHORT СЛОМАН — ФИКСИРУЕМ")
 
@@ -292,6 +294,7 @@ async def scanner_background():
     while True:
         tasks = []
         for s in ALL_SYMBOLS:
+            # ПРОВЕРКА: is_coin_enabled теперь вернет False, если монета отключена в DB.
             if await is_coin_enabled(s):
                 tf = await get_tf_for_coin(s)
                 tasks.append(check_pair(ex, s, tf))
@@ -304,6 +307,7 @@ async def scanner_background():
 # ========================= ВЕБ-ПАНЕЛЬ =========================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # При запуске сервера (или деплое) инициализируется БД с ВЫКЛЮЧЕННЫМИ настройками
     await init_db()
     # Запуск фонового сканера при старте приложения
     asyncio.create_task(scanner_background())
