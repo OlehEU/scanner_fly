@@ -26,10 +26,10 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://bot-fly-oz.fly.dev/webhook")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") 
 
 # ========================= НАСТРОЙКИ =========================
-# АКТУАЛЬНЫЙ СПИСОК (Обновлен: 23 пары, включая все запрошенные)
+# КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: ЗАМЕНА "SHIB/USDT" НА "1000SHIB/USDT"
 ALL_SYMBOLS = [
     # Мемкоины и токены с высокой точностью (0 знаков после запятой)
-    "DOGE/USDT", "SHIB/USDT", "PEPE/USDT", "1000PEPE/USDT", "BONK/USDT", 
+    "DOGE/USDT", "1000SHIB/USDT", "PEPE/USDT", "1000PEPE/USDT", "BONK/USDT", 
     "FLOKI/USDT", "1000SATS/USDT", "FARTCOIN/USDT", "LUNC/USDT", "BTT/USDT", 
     "MASK/USDT",
     # Основные и Layer 1/2 монеты
@@ -53,6 +53,35 @@ COOLDOWNS = {
 }
 
 LAST_SIGNAL = {} # {"LONG_DOGE/USDT_45m": timestamp, ...}
+
+# ========================= 1.5. ЛОГИКА ОКРУГЛЕНИЯ ЦЕНЫ (ИСПРАВЛЕНИЕ ОШИБКИ ТОЧНОСТИ) =========================
+
+def get_rounded_price(price: float) -> float:
+    """
+    Применяет логику динамического округления к цене, 
+    чтобы соответствовать требованиям точности биржи Binance (фьючерсы).
+    
+    Эта функция устраняет ошибку 'Precision Error' при отправке вебхука, 
+    выбирая нужную точность для каждой ценовой категории монеты.
+
+    :param price: Цена монеты, полученная от сканера.
+    :return: Округленная цена, готовая для отправки на биржу.
+    """
+    # 1. Для очень маленьких цен (например, 1000SHIB, 1000SATS)
+    if price < 0.05:
+        # Высокая точность (до 8 знаков после запятой)
+        precision = 8
+    # 2. Для цен менее $1 (например, DOGE, ADA, 1000PEPE)
+    elif price < 1.0:
+        # Средняя точность (до 6 знаков после запятой)
+        precision = 6
+    # 3. Для цен больше $1 (например, NEAR, SOL, ETH)
+    else:
+        # Низкая точность (до 3 знаков после запятой)
+        precision = 3
+    
+    # Округляем цену
+    return round(price, precision)
 
 # ========================= БАЗА =========================
 async def init_db():
@@ -79,6 +108,8 @@ async def init_db():
         
         # ИЗМЕНЕНИЕ: Установка по умолчанию для каждой монеты на 0 (ВЫКЛЮЧЕНА)
         for s in ALL_SYMBOLS:
+            # Используем INSERT OR IGNORE, чтобы не перезаписывать настройки существующих монет,
+            # но добавить 1000SHIB/USDT, если его не было.
             await db.execute(
                 "INSERT OR IGNORE INTO coin_settings (symbol, tf, enabled) VALUES (?, '1h', 0)",
                 (s,)
@@ -131,7 +162,7 @@ async def send_telegram(text: str):
     try:
         async with aiohttp.ClientSession() as session:
             await session.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                               json={"chat_id": int(TELEGRAM_CHAT_ID), "text": text, "parse_mode": "HTML", "disable_web_page_preview": True})
+                                 json={"chat_id": int(TELEGRAM_CHAT_ID), "text": text, "parse_mode": "HTML", "disable_web_page_preview": True})
     except Exception as e:
         print(f"[ERROR] Telegram send failed: {e}")
 
@@ -142,13 +173,16 @@ async def send_to_oz_webhook(symbol: str, tf: str, direction: str, price: float,
         print("[WARNING] WEBHOOK_SECRET не установлен. Пропуск отправки на бот.")
         return
         
+    # КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Динамическое округление цены для избежания ошибки Precision Error
+    rounded_price = get_rounded_price(price)
+    
     payload = {
         "symbol": symbol.split('/')[0] + 'USDT', # Отправка в формате DOGEUSDT
         "signal": direction.upper(), 
         "timeframe": tf,
-        "price": round(price, 8),
+        "price": rounded_price, # Используем динамически округленную цену
         "reason": reason,
-        "source": "OZ SCANNER ULTRA PRO 2026 v2.8"
+        "source": "OZ SCANNER ULTRA PRO 2026 v3.0"
     }
     
     # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ ДЛЯ 403: Отправка секрета в заголовке X-Webhook-Secret
@@ -164,7 +198,7 @@ async def send_to_oz_webhook(symbol: str, tf: str, direction: str, price: float,
                  if response.status != 200:
                     print(f"[ERROR] Webhook failed for {symbol}: {response.status} - {await response.text()}")
                  else:
-                    print(f"[INFO] Webhook успешно отправлен для {symbol}.")
+                    print(f"[INFO] Webhook успешно отправлен для {symbol} по цене {rounded_price}.")
         except Exception as e:
             print(f"[ERROR] Webhook connection failed for {symbol}: {e}")
 
@@ -176,7 +210,7 @@ async def send_signal(symbol, tf, direction, price, reason):
                              (symbol, tf, direction, price, reason, ts))
         await db.commit()
 
-    text = (f"OZ ULTRA PRO 2026 v2.8\n"
+    text = (f"OZ ULTRA PRO 2026 v3.0\n"
             f"<b>{direction.upper()}</b>\n"
             f"<code>{symbol}</code> | <code>{tf}</code>\n"
             f"Цена: <code>{price:.6f}</code>\n"
@@ -184,6 +218,7 @@ async def send_signal(symbol, tf, direction, price, reason):
             f"<a href='https://www.tradingview.com/chart/?symbol=BINANCE:{symbol.replace('/', '')}&interval={tf}'>ГРАФИК</a>")
 
     await send_telegram(text)
+    # ПЕРЕДАЕМ ИСХОДНУЮ ЦЕНУ, ОНА БУДЕТ ОКРУГЛЕНА ВНУТРИ send_to_oz_webhook
     await send_to_oz_webhook(symbol, tf, direction, price, reason)
 
 # ========================= СКАНЕР =========================
@@ -289,7 +324,7 @@ async def scanner_background():
     # Инициализация ccxt с ограничением скорости
     ex = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
     # Обновленное сообщение при запуске
-    await send_telegram("OZ SCANNER ULTRA PRO 2026 v2.9 (4x) — ЗАПУЩЕН\nКонфигурация: FARTCOIN + 45m + ТЕЛЕГА + ХУК\nК миллиардам!")
+    await send_telegram("OZ SCANNER ULTRA PRO 2026 v3.0 (4x) — ЗАПУЩЕН\nКонфигурация: ВСЕ ПАРЫ + ТЕЛЕГА + ХУК\nК миллиардам!")
     
     while True:
         tasks = []
@@ -325,7 +360,7 @@ async def toggle_setting_endpoint(key: str):
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%"><h1>OZ ULTRA PRO 2026 v2.9 (4x)</h1><form action="/login" method="post"><input type="password" name="password" placeholder="Пароль" style="font-size:24px;padding:12px;width:300px"><br><br><button type="submit" style="font-size:24px;padding:12px 40px">ВОЙТИ</button></form></body></html>'
+    return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%"><h1>OZ ULTRA PRO 2026 v3.0 (4x)</h1><form action="/login" method="post"><input type="password" name="password" placeholder="Пароль" style="font-size:24px;padding:12px;width:300px"><br><br><button type="submit" style="font-size:24px;padding:12px 40px">ВОЙТИ</button></form></body></html>'
 
 @app.post("/login")
 async def login(password: str = Form(...)):
@@ -349,7 +384,7 @@ async def panel():
         'close_short_enabled': 'СИГНАЛЫ CLOSE SHORT',
     }
 
-    html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:1.8;text-align:center'>OZ ULTRA PRO 2026 v2.9 (4x) — УПРАВЛЕНИЕ\n\n"
+    html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:1.8;text-align:center'>OZ ULTRA PRO 2026 v3.0 (4x) — УПРАВЛЕНИЕ\n\n"
     
     # БЛОК ГЛОБАЛЬНЫХ ПЕРЕКЛЮЧАТЕЛЕЙ
     html += "<b style='color:#0ff'>--- ГЛОБАЛЬНЫЙ КОНТРОЛЬ СИГНАЛОВ ---</b>\n"
