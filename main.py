@@ -26,12 +26,12 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://bot-fly-oz.fly.dev/webhook")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET") 
 
 # ========================= НАСТРОЙКИ =========================
-# КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: ЗАМЕНА "SHIB/USDT" НА "1000SHIB/USDT"
+# КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: ЗАМЕНА "SHIB/USDT" НА "1000SHIB/USDT" + Обновление списка мемов
 ALL_SYMBOLS = [
     # Мемкоины и токены с высокой точностью (0 знаков после запятой)
-    "DOGE/USDT", "1000SHIB/USDT", "PEPE/USDT", "1000PEPE/USDT", "BONK/USDT", 
-    "FLOKI/USDT", "1000SATS/USDT", "FARTCOIN/USDT", "LUNC/USDT", "BTT/USDT", 
-    "MASK/USDT",
+    "DOGE/USDT", "1000SHIB/USDT", "1000PEPE/USDT", "1000BONK/USDT", 
+    "1000FLOKI/USDT", "1000SATS/USDT", "FARTCOIN/USDT", "PIPPIN/USDT", 
+    "BTT/USDT", "MASK/USDT",
     # Основные и Layer 1/2 монеты
     "ETH/USDT", "BNB/USDT", "SOL/USDT", "ADA/USDT", "TRX/USDT", "MATIC/USDT", 
     "DOT/USDT", "ATOM/USDT", "LINK/USDT", "AVAX/USDT", "NEAR/USDT", 
