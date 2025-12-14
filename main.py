@@ -1,4 +1,9 @@
-# main.py — OZ Scanner Ultra Pro 2026 v3 | Финальная версия 2025
+# ========================= OZ SCANNER ULTRA PRO (4x) =========================
+# ВЕРСИЯ: 3.0 (Добавлен таймфрейм 15m)
+# АВТОР: OZ Team
+# ОПИСАНИЕ: Асинхронный фьючерсный сканер на CCXT + Binance с веб-панелью,
+#           базой данных SQLite и отправкой сигналов в Telegram/Webhook.
+# ==================================================================================
 import ccxt.async_support as ccxt
 import asyncio
 import pandas as pd
@@ -38,15 +43,17 @@ ALL_SYMBOLS = [
     "XRP/USDT" 
 ]
 
-# АКТУАЛЬНЫЕ ТФ: Удален '45m'
-ALL_TFS = ['1m', '5m', '30m', '1h', '4h']
+# АКТУАЛЬНЫЕ ТФ: Добавлен '15m'
+ALL_TFS = ['1m', '5m', '15m', '30m', '1h', '4h']
 DB_PATH = "oz_ultra.db"
 
 # Кулдауны под каждый таймфрейм (в секундах)
-# ДОБАВЛЕНЫ: 'short' и 'close_short' для контроля частоты шортовых сигналов
+# ДОБАВЛЕНЫ: Настройки для '15m'
 COOLDOWNS = {
     '1m': {'long': 240, 'close': 180, 'short': 240, 'close_short': 180},
     '5m': {'long': 480, 'close': 300, 'short': 480, 'close_short': 300},
+    # НОВЫЙ ТФ 15М: 12 минут (720с) на вход, 7.5 минут (450с) на выход
+    '15m': {'long': 720, 'close': 450, 'short': 720, 'close_short': 450}, 
     '30m': {'long': 1200, 'close': 600, 'short': 1200, 'close_short': 600},
     '1h': {'long': 3600, 'close': 1800, 'short': 3600, 'close_short': 1800},
     '4h': {'long': 10800, 'close': 5400, 'short': 10800, 'close_short': 5400},
@@ -182,7 +189,7 @@ async def send_to_oz_webhook(symbol: str, tf: str, direction: str, price: float,
         "timeframe": tf,
         "price": rounded_price, # Используем динамически округленную цену
         "reason": reason,
-        "source": "OZ SCANNER ULTRA PRO 2026 v3.0"
+        "source": "OZ SCANNER Ultra Pro v3.0" # Обновление названия сканера в вебхуке
     }
     
     # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ ДЛЯ 403: Отправка секрета в заголовке X-Webhook-Secret
@@ -210,12 +217,31 @@ async def send_signal(symbol, tf, direction, price, reason):
                              (symbol, tf, direction, price, reason, ts))
         await db.commit()
 
-    text = (f"OZ ULTRA PRO 2026 v3.0\n"
-            f"<b>{direction.upper()}</b>\n"
-            f"<code>{symbol}</code> | <code>{tf}</code>\n"
-            f"Цена: <code>{price:.6f}</code>\n"
-            f"<b>{reason}</b>\n"
-            f"<a href='https://www.tradingview.com/chart/?symbol=BINANCE:{symbol.replace('/', '')}&interval={tf}'>ГРАФИК</a>")
+    # --- ЛОГИКА ОФОРМЛЕНИЯ СООБЩЕНИЯ В ТЕЛЕГРАМ ---
+    icon = "💡"
+    display_direction = direction.upper()
+    
+    if direction == "LONG":
+        icon = "🟢"
+        display_direction = "LONG"
+    elif direction == "SHORT":
+        icon = "🔴"
+        display_direction = "SHORT"
+    elif direction == "CLOSE_LONG":
+        icon = "✅"
+        display_direction = "ФИКСАЦИЯ LONG"
+    elif direction == "CLOSE_SHORT":
+        icon = "✅"
+        display_direction = "ФИКСАЦИЯ SHORT"
+        
+    text = (f"🚀 OZ SCANNER Ultra Pro v3.0\n"
+            f"{icon} <b>{display_direction}</b>\n"
+            f"💰 Монета: <code>{symbol}</code> | ⏰ ТФ: <code>{tf}</code>\n"
+            f"💲 Цена: <code>{price:.6f}</code>\n"
+            f"🔥 Причина: <b>{reason}</b>\n"
+            f"<a href='https://www.tradingview.com/chart/?symbol=BINANCE:{symbol.replace('/', '')}&interval={tf}'>➡️ ГРАФИК (TradingView)</a>")
+    # --- КОНЕЦ ЛОГИКИ ОФОРМЛЕНИЯ ---
+
 
     await send_telegram(text)
     # ПЕРЕДАЕМ ИСХОДНУЮ ЦЕНУ, ОНА БУДЕТ ОКРУГЛЕНА ВНУТРИ send_to_oz_webhook
@@ -324,7 +350,7 @@ async def scanner_background():
     # Инициализация ccxt с ограничением скорости
     ex = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
     # Обновленное сообщение при запуске
-    await send_telegram("OZ SCANNER ULTRA PRO 2026 v3.0 (4x) — ЗАПУЩЕН\nКонфигурация: ВСЕ ПАРЫ + ТЕЛЕГА + ХУК\nК миллиардам!")
+    await send_telegram("🚀 OZ SCANNER Ultra Pro v3.0 (4x) — ЗАПУЩЕН\nКонфигурация: ВСЕ ПАРЫ + ТЕЛЕГА + ХУК\nК миллиардам!")
     
     while True:
         tasks = []
@@ -360,7 +386,7 @@ async def toggle_setting_endpoint(key: str):
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%"><h1>OZ ULTRA PRO 2026 v3.0 (4x)</h1><form action="/login" method="post"><input type="password" name="password" placeholder="Пароль" style="font-size:24px;padding:12px;width:300px"><br><br><button type="submit" style="font-size:24px;padding:12px 40px">ВОЙТИ</button></form></body></html>'
+    return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%"><h1>OZ ULTRA PRO v3.0 (4x)</h1><form action="/login" method="post"><input type="password" name="password" placeholder="Пароль" style="font-size:24px;padding:12px;width:300px"><br><br><button type="submit" style="font-size:24px;padding:12px 40px">ВОЙТИ</button></form></body></html>'
 
 @app.post("/login")
 async def login(password: str = Form(...)):
@@ -384,7 +410,7 @@ async def panel():
         'close_short_enabled': 'СИГНАЛЫ CLOSE SHORT',
     }
 
-    html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:1.8;text-align:center'>OZ ULTRA PRO 2026 v3.0 (4x) — УПРАВЛЕНИЕ\n\n"
+    html = "<pre style='color:#0f0;background:#000;font-size:22px;line-height:1.8;text-align:center'>OZ ULTRA PRO v3.0 (4x) — УПРАВЛЕНИЕ\n\n"
     
     # БЛОК ГЛОБАЛЬНЫХ ПЕРЕКЛЮЧАТЕЛЕЙ
     html += "<b style='color:#0ff'>--- ГЛОБАЛЬНЫЙ КОНТРОЛЬ СИГНАЛОВ ---</b>\n"
@@ -447,7 +473,14 @@ async def signals():
     t = "<table border=1 style='color:#0f0;background:#000;width:95%;margin:auto;font-size:18px;text-align:center'><tr><th>Монета</th><th>ТФ</th><th>Сигнал</th><th>Цена</th><th>Причина</th><th>Время</th></tr>"
     for r in rows:
         color = "#0f0" if r[2] == "LONG" else "#f00" if r[2] == "SHORT" else "#ccc"
-        t += f"<tr><td>{r[0]}</td><td>{r[1]}</td><td style='color:{color}'><b>{r[2]}</b></td><td>{r[3]:.6f}</td><td>{r[4]}</td><td>{r[5]}</td></tr>"
+        # Для отображения в веб-панели можно добавить небольшую иконку
+        direction_text = r[2]
+        if direction_text == "LONG": direction_text = "🟢 LONG"
+        elif direction_text == "SHORT": direction_text = "🔴 SHORT"
+        elif direction_text == "CLOSE_LONG": direction_text = "✅ ФИКСАЦИЯ LONG"
+        elif direction_text == "CLOSE_SHORT": direction_text = "✅ ФИКСАЦИЯ SHORT"
+        
+        t += f"<tr><td>{r[0]}</td><td>{r[1]}</td><td style='color:{color}'><b>{direction_text}</b></td><td>{r[3]:.6f}</td><td>{r[4]}</td><td>{r[5]}</td></tr>"
     t += "</table><br><a href='/panel' style='display:block;margin-top:20px;color:#0f0'>НАЗАД</a>"
     return HTMLResponse(f"<body style='background:#000;color:#0f0;font-family:monospace'>{t}</body>")
 
