@@ -1,5 +1,6 @@
 # ========================= OZ SCANNER ULTRA PRO (4x) =========================
-# ВЕРСИЯ: 3.2.1 
+# ВЕРСИЯ: 3.2.1 (Debug Edition)
+# ОПИСАНИЕ: Добавлено расширенное логирование циклов сканирования для Fly.io
 # =============================================================================
 import ccxt.async_support as ccxt
 import asyncio
@@ -14,8 +15,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 import aiohttp
 from contextlib import asynccontextmanager
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Настройка логирования для Fly.io (вывод в stdout)
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - [%(levelname)s] - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger("OZ_ULTRA")
 
 # ========================= КОНФИГУРАЦИЯ =========================
@@ -73,7 +78,7 @@ async def init_db():
         for s in ALL_SYMBOLS:
             await db.execute("INSERT OR IGNORE INTO coin_settings (symbol, tf, enabled) VALUES (?, '1h', 0)", (s,))
         await db.commit()
-    logger.info("Database Initialized")
+    logger.info("База данных инициализирована. Настройки загружены.")
 
 async def get_setting(key: str) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
@@ -116,8 +121,8 @@ async def send_telegram(text: str):
             async with session.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                                    json={"chat_id": str(TELEGRAM_CHAT_ID), "text": text, "parse_mode": "HTML"}) as r:
                 if r.status != 200:
-                    logger.error(f"TG Error Status: {r.status}")
-        except Exception as e: logger.error(f"TG Fail: {e}")
+                    logger.error(f"Ошибка Telegram API: {r.status}")
+        except Exception as e: logger.error(f"Сбой отправки в Telegram: {e}")
 
 async def send_to_webhook(symbol, tf, direction, price, reason):
     if not WEBHOOK_SECRET: return
@@ -133,8 +138,8 @@ async def send_to_webhook(symbol, tf, direction, price, reason):
     async with aiohttp.ClientSession(headers=headers) as session:
         try:
             async with session.post(WEBHOOK_URL, json=payload, timeout=10) as r:
-                logger.info(f"Webhook {symbol} {direction} Status: {r.status}")
-        except Exception as e: logger.error(f"Webhook error: {e}")
+                logger.info(f"Вебхук отправлен: {symbol} {direction} (Status: {r.status})")
+        except Exception as e: logger.error(f"Ошибка вебхука: {e}")
 
 async def broadcast_signal(symbol, tf, direction, price, reason):
     rounded_p = get_rounded_price(price)
@@ -153,10 +158,11 @@ async def broadcast_signal(symbol, tf, direction, price, reason):
 
 # ========================= ЯДРО СКАНЕРА =========================
 async def check_pair(exchange, symbol, tf):
-    if not await is_coin_enabled(symbol): return
     try:
+        # Логируем запрос к бирже
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=tf, limit=150)
-        if not ohlcv or len(ohlcv) < 100: return
+        if not ohlcv or len(ohlcv) < 100:
+            return
         
         df = pd.DataFrame(ohlcv, columns=['ts','open','high','low','close','volume'])
         df['ema34'] = talib.EMA(df['close'], 34)
@@ -176,54 +182,75 @@ async def check_pair(exchange, symbol, tf):
         now = datetime.now().timestamp()
         cd = COOLDOWNS.get(tf, COOLDOWNS['1h'])
 
-        # Сигналы
+        # Логика входа Long
         if await get_setting('long_entry_enabled') and bullish and 45 < rsi < 75 and c > prev_c:
             if now - LAST_SIGNAL.get(f"L_{key}", 0) > cd['long']:
                 LAST_SIGNAL[f"L_{key}"] = now
                 await broadcast_signal(symbol, tf, "LONG", c, "BULLISH TREND")
 
+        # Логика входа Short
         if await get_setting('short_entry_enabled') and bearish and 25 < rsi < 55 and c < prev_c:
             if now - LAST_SIGNAL.get(f"S_{key}", 0) > cd['short']:
                 LAST_SIGNAL[f"S_{key}"] = now
                 await broadcast_signal(symbol, tf, "SHORT", c, "BEARISH TREND")
 
+        # Логика выхода Long
         if await get_setting('close_long_enabled') and c < ema55:
             if now - LAST_SIGNAL.get(f"CL_{key}", 0) > cd['close']:
                 LAST_SIGNAL[f"CL_{key}"] = now
                 await broadcast_signal(symbol, tf, "CLOSE_LONG", c, "EMA55 EXIT")
 
+        # Логика выхода Short
         if await get_setting('close_short_enabled') and c > ema55:
             if now - LAST_SIGNAL.get(f"CS_{key}", 0) > cd['close_short']:
                 LAST_SIGNAL[f"CS_{key}"] = now
                 await broadcast_signal(symbol, tf, "CLOSE_SHORT", c, "EMA55 EXIT")
 
     except Exception as e:
-        logger.error(f"Error checking {symbol} {tf}: {e}")
+        logger.error(f"Ошибка при проверке {symbol} [{tf}]: {e}")
 
 async def scanner_worker():
+    # Настройка Binance Futures
     ex = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
-    await send_telegram("✅ <b>OZ SCANNER v3.2.1</b>: Система онлайн. Fly.io Mode.")
+    await send_telegram("✅ <b>OZ SCANNER v3.2.1</b>: Мониторинг запущен.")
+    logger.info("Сканер запущен. Ожидание активации монет...")
+    
     while True:
         try:
-            tasks = []
+            # Получаем список активных монет
+            active_symbols = []
             for s in ALL_SYMBOLS:
                 if await is_coin_enabled(s):
-                    tf = await get_tf_for_coin(s)
-                    tasks.append(check_pair(ex, s, tf))
-            
-            if tasks:
-                # Разбиваем на пачки по 5, чтобы не спамить API Binance
-                for i in range(0, len(tasks), 5):
-                    batch = tasks[i:i+5]
-                    await asyncio.gather(*batch, return_exceptions=True)
-                    await asyncio.sleep(0.5) 
-            
-            await asyncio.sleep(25)
-        except Exception as e:
-            logger.error(f"Worker main loop error: {e}")
-            await asyncio.sleep(10)
+                    active_symbols.append(s)
 
-# ========================= WEB UI =========================
+            if not active_symbols:
+                logger.info("Нет активных монет для сканирования. Ожидание 30 сек...")
+                await asyncio.sleep(30)
+                continue
+
+            # ЛОГИ: Начало цикла загрузки
+            logger.info(f">>> НАЧАЛО ЦИКЛА СКАНЕРА: Обработка {len(active_symbols)} монет...")
+            
+            tasks = []
+            for s in active_symbols:
+                tf = await get_tf_for_coin(s)
+                tasks.append(check_pair(ex, s, tf))
+            
+            # Выполняем запросы пачками по 5, чтобы не вызвать бан от Binance
+            for i in range(0, len(tasks), 5):
+                batch = tasks[i:i+5]
+                await asyncio.gather(*batch, return_exceptions=True)
+                await asyncio.sleep(0.5) 
+            
+            # ЛОГИ: Завершение цикла
+            logger.info(f"<<< КОНЕЦ ЦИКЛА СКАНЕРА. Данные обновлены. Пауза 25 сек.")
+            await asyncio.sleep(25)
+
+        except Exception as e:
+            logger.error(f"Критическая ошибка в воркере: {e}")
+            await asyncio.sleep(15)
+
+# ========================= WEB UI (FASTAPI) =========================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -271,7 +298,7 @@ async def admin():
                     grid += f'<a href="/set_tf/{safe}/{t}" style="text-decoration:none; {t_style} padding:2px 6px; border-radius:3px; font-size:10px">{t}</a>'
                 grid += '</div></div>'
     grid += '</div>'
-    return f'<body style="background:#0a0a0a; color:#eee; font-family: sans-serif; padding:15px; max-width:1200px; margin:auto"><h2>OZ SCANNER v3.2.1</h2>{g_row}{grid}<br><a href="/history" style="color:#2ecc71">History</a></body>'
+    return f'<body style="background:#0a0a0a; color:#eee; font-family: sans-serif; padding:15px; max-width:1200px; margin:auto"><h2>OZ SCANNER v3.2.1</h2>{g_row}{grid}<br><a href="/history" style="color:#2ecc71; text-decoration:none; font-weight:bold">📊 ИСТОРИЯ СИГНАЛОВ</a></body>'
 
 @app.get("/toggle_g/{key}")
 async def tg_g(key: str):
@@ -295,10 +322,10 @@ async def history():
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT symbol, direction, price, tf, datetime(ts/1000,'unixepoch','localtime') FROM signals ORDER BY ts DESC LIMIT 50") as cur:
             rows = await cur.fetchall()
-    h = '<table style="width:100%; color:#2ecc71"><tr><th>Date</th><th>Coin</th><th>Type</th><th>TF</th><th>Price</th></tr>'
+    h = '<table style="width:100%; color:#2ecc71; border-collapse:collapse"><tr style="text-align:left; border-bottom:1px solid #333"><th>Дата</th><th>Монета</th><th>Тип</th><th>ТФ</th><th>Цена</th></tr>'
     for r in rows:
-        h += f'<tr><td>{r[4]}</td><td>{r[0]}</td><td>{r[1]}</td><td>{r[3]}</td><td>{r[2]}</td></tr>'
-    return f'<body style="background:#000; color:white; padding:20px"><h2>HISTORY</h2>{h}</table><br><a href="/admin">BACK</a></body>'
+        h += f'<tr style="border-bottom:1px solid #111"><td>{r[4]}</td><td>{r[0]}</td><td>{r[1]}</td><td>{r[3]}</td><td>{r[2]}</td></tr>'
+    return f'<body style="background:#000; color:white; padding:20px"><h2>ПОСЛЕДНИЕ СИГНАЛЫ (50)</h2>{h}</table><br><a href="/admin" style="color:#2ecc71">НАЗАД В АДМИНКУ</a></body>'
 
 if __name__ == "__main__":
     import uvicorn
