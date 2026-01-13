@@ -1,10 +1,11 @@
 """
 =============================================================================
-🚀 OZ SCANNER ULTRA PRO v3.5.2 | FIXED PANDAS AMBIGUITY
+🚀 OZ SCANNER ULTRA PRO v3.5.2 | UI RESTORED & PANDAS FIXED
 =============================================================================
 - Исправлено: Ошибка "The truth value of a Series is ambiguous" (iloc[-1] fix).
 - Исправлено: Округление цен для 1000PEPE, 1000SHIB и др.
 - Добавлено: Сохранение настроек в БД и расширенная статистика.
+- UI: Возвращен классический дизайн с кнопками управления режимами.
 =============================================================================
 """
 
@@ -135,7 +136,7 @@ async def check_pair(exchange, symbol):
         df['rsi'] = talib.RSI(df['close'], 14)
         df['atr'] = talib.ATR(df['high'], df['low'], df['close'], 14)
         
-        # Берем последние значения (FIX: .iloc[-1] предотвращает ошибку Ambiguous Series)
+        # Берем последние значения (.iloc[-1] fix)
         c = df['close'].iloc[-1]
         p = df['close'].iloc[-2]
         rsi = df['rsi'].iloc[-1]
@@ -233,7 +234,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/", response_class=HTMLResponse)
 async def login_page():
-    return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%"><h1>OZ ULTRA PRO</h1><form action="/login" method="post"><input type="password" name="password" style="font-size:20px;padding:10px"><br><br><button type="submit" style="padding:10px 30px">ВХОД</button></form></body></html>'
+    return '<html><body style="background:#000;color:#0f0;font-family:monospace;text-align:center;padding-top:15%"><h1>OZ ULTRA PRO</h1><form action="/login" method="post"><input type="password" name="password" style="font-size:20px;padding:10px;background:#111;color:#0f0;border:1px solid #0f0"><br><br><button type="submit" style="padding:10px 30px;background:#0f0;color:#000;border:none;cursor:pointer;font-weight:bold">ВХОД</button></form></body></html>'
 
 @app.post("/login")
 async def login(password: str = Form(...)):
@@ -246,18 +247,67 @@ async def login(password: str = Form(...)):
 @app.get("/panel", response_class=HTMLResponse)
 async def admin_panel():
     async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT key, value FROM settings") as cur:
+            settings = {k: v for k, v in await cur.fetchall()}
         async with db.execute("SELECT key, value FROM stats") as cur:
             stats = {k: v for k, v in await cur.fetchall()}
         async with db.execute("SELECT symbol, enabled, tf FROM coin_settings ORDER BY symbol ASC") as cur:
             coins = await cur.fetchall()
-    
-    grid = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px">'
+
+    def btn_style(val):
+        return "background:#0f0;color:#000" if val == '1' else "background:#333;color:#888"
+
+    # Глобальные кнопки управления
+    controls = f'''
+    <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap">
+        <a href="/toggle_s/long_enabled" style="text-decoration:none;padding:15px 25px;border-radius:5px;font-weight:bold;{btn_style(settings.get('long_enabled'))}">LONG SIGNALS</a>
+        <a href="/toggle_s/short_enabled" style="text-decoration:none;padding:15px 25px;border-radius:5px;font-weight:bold;{btn_style(settings.get('short_enabled'))}">SHORT SIGNALS</a>
+        <a href="/toggle_s/close_enabled" style="text-decoration:none;padding:15px 25px;border-radius:5px;font-weight:bold;{btn_style(settings.get('close_enabled'))}">CLOSE ALERTS</a>
+        <a href="/panel" style="text-decoration:none;padding:15px 25px;border-radius:5px;font-weight:bold;background:#555;color:#fff">REFRESH</a>
+    </div>
+    '''
+
+    # Сетка монет
+    grid = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px">'
     for s, en, tf in coins:
         safe_s = s.replace("/", "---")
-        grid += f'<div style="background:#111;padding:10px;border:1px solid #333;border-radius:5px">{s} | <a href="/toggle_c/{safe_s}">[{"ON" if en else "OFF"}]</a><br><small>{tf}</small></div>'
+        status_color = "#0f0" if en else "#555"
+        grid += f'''
+        <div style="background:#111;padding:15px;border:1px solid #333;border-radius:8px;text-align:center">
+            <b style="font-size:1.1em;color:#fff">{s}</b><br>
+            <span style="color:#888">{tf}</span><br><br>
+            <a href="/toggle_c/{safe_s}" style="text-decoration:none;color:{status_color};border:1px solid {status_color};padding:5px 15px;border-radius:3px;font-size:0.8em">
+                {"ENABLED" if en else "DISABLED"}
+            </a>
+        </div>'''
     grid += '</div>'
 
-    return f"<html><body style='background:#000;color:#0f0;font-family:sans-serif;padding:20px'><h2>OZ PANEL</h2><p>SCANS: {stats.get('total_scans')} | SIGNALS: {stats.get('signals_sent')}</p>{grid}</body></html>"
+    html = f'''
+    <html>
+    <head><title>OZ ULTRA PANEL</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+    <body style="background:#050505;color:#0f0;font-family:sans-serif;padding:20px;margin:0">
+        <div style="max-width:1200px;margin:auto">
+            <h1 style="color:#0f0;margin-bottom:5px">OZ ULTRA PRO <small style="color:#555;font-size:0.4em">v3.5.2</small></h1>
+            <p style="background:#111;padding:10px;border-radius:5px;border-left:4px solid #0f0">
+                🚀 SCANS: <b>{stats.get('total_scans', 0)}</b> | 
+                📡 SIGNALS: <b>{stats.get('signals_sent', 0)}</b> | 
+                ⚠️ ERRORS: <span style="color:red">{stats.get('errors', 0)}</span>
+            </p>
+            {controls}
+            <h3 style="border-bottom:1px solid #222;padding-bottom:10px;color:#888">COIN MONITORING</h3>
+            {grid}
+        </div>
+    </body>
+    </html>
+    '''
+    return html
+
+@app.get("/toggle_s/{key}")
+async def toggle_setting(key: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE settings SET value = CASE WHEN value='1' THEN '0' ELSE '1' END WHERE key=?", (key,))
+        await db.commit()
+    return RedirectResponse("/panel")
 
 @app.get("/toggle_c/{symbol}")
 async def toggle_c(symbol: str):
