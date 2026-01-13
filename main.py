@@ -1,11 +1,10 @@
 """
 =============================================================================
-🚀 OZ SCANNER ULTRA PRO v3.5.2 | UI RESTORED & PANDAS FIXED
+🚀 OZ SCANNER ULTRA PRO v3.5.2 | UI 3.2.1 RESTORED
 =============================================================================
-- Исправлено: Ошибка "The truth value of a Series is ambiguous" (iloc[-1] fix).
-- Исправлено: Округление цен для 1000PEPE, 1000SHIB и др.
-- Добавлено: Сохранение настроек в БД и расширенная статистика.
-- UI: Возвращен классический дизайн с кнопками управления режимами.
+- UI: Полностью возвращен интерфейс версии 3.2.1.
+- Logic: Исправлена ошибка Series Ambiguity (iloc[-1]).
+- Stability: Сохранение настроек в БД, кулдауны, фикс точности цен.
 =============================================================================
 """
 
@@ -38,19 +37,13 @@ ALL_SYMBOLS = [
     "1000FLOKI/USDT", "1000SATS/USDT", "NEAR/USDT", "SUI/USDT", "TIA/USDT"
 ]
 
-ALL_TFS = ['1m', '5m', '15m', '30m', '1h', '4h']
 DB_PATH = "oz_ultra_v3.db"
-
-# Кулдауны (в секундах)
-COOLDOWNS = {
-    '1m': 240, '5m': 480, '15m': 720, '30m': 1200, '1h': 3600, '4h': 10800
-}
+COOLDOWNS = {'1m': 240, '5m': 480, '15m': 720, '30m': 1200, '1h': 3600, '4h': 10800}
 LAST_SIGNALS = {} 
 
 # ========================= СЛУЖЕБНЫЕ ФУНКЦИИ =========================
 
 def get_rounded_price(price: float) -> float:
-    """Динамическое округление для соответствия точности Binance"""
     if price < 0.0001: return round(price, 8)
     elif price < 0.05: return round(price, 7)
     elif price < 1.0: return round(price, 6)
@@ -62,13 +55,8 @@ async def send_to_webhook(payload: dict):
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(WEBHOOK_URL, json=payload, headers=headers, timeout=10) as resp:
-                if resp.status == 200:
-                    logger.info(f"✅ Webhook success: {payload['symbol']}")
-                    await update_stat('signals_sent')
-                else:
-                    logger.error(f"❌ Webhook {resp.status}")
-        except Exception:
-            logger.error("❌ Webhook failed")
+                if resp.status == 200: await update_stat('signals_sent')
+        except: pass
 
 async def send_tg(text: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
@@ -83,10 +71,6 @@ async def send_tg(text: str):
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript('''
-            CREATE TABLE IF NOT EXISTS signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT, tf TEXT, direction TEXT, price REAL, reason TEXT, ts INTEGER
-            );
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
             CREATE TABLE IF NOT EXISTS stats (key TEXT PRIMARY KEY, value INTEGER DEFAULT 0);
             CREATE TABLE IF NOT EXISTS coin_settings (
@@ -129,14 +113,13 @@ async def check_pair(exchange, symbol):
         
         df = pd.DataFrame(ohlcv, columns=['ts','open','high','low','close','volume'])
         
-        # Индикаторы
         df['ema34'] = talib.EMA(df['close'], 34)
         df['ema55'] = talib.EMA(df['close'], 55)
         df['ema200'] = talib.EMA(df['close'], 200)
         df['rsi'] = talib.RSI(df['close'], 14)
         df['atr'] = talib.ATR(df['high'], df['low'], df['close'], 14)
         
-        # Берем последние значения (.iloc[-1] fix)
+        # FIX: Явное извлечение последнего значения через .iloc[-1]
         c = df['close'].iloc[-1]
         p = df['close'].iloc[-2]
         rsi = df['rsi'].iloc[-1]
@@ -149,58 +132,26 @@ async def check_pair(exchange, symbol):
         reason = ""
         now_ts = datetime.now().timestamp()
 
-        # 1. ЛОГИКА LONG
-        trend_bull = (c > e34) and (e34 > e55) and (e55 > e200)
-        if trend_bull and 48 < rsi < 78 and (c - p) > (atr * 0.25):
+        if (c > e34) and (e34 > e55) and (e55 > e200) and (48 < rsi < 78) and ((c - p) > (atr * 0.25)):
             if await get_setting('long_enabled'):
-                signal = "LONG"
-                reason = "Strong BULL Trend + RSI"
+                signal, reason = "LONG", "Strong BULL Trend"
 
-        # 2. ЛОГИКА SHORT
-        trend_bear = (c < e34) and (e34 < e55) and (e55 < e200)
-        if trend_bear and 22 < rsi < 52 and (p - c) > (atr * 0.25):
+        elif (c < e34) and (e34 < e55) and (e55 < e200) and (22 < rsi < 52) and ((p - c) > (atr * 0.25)):
             if await get_setting('short_enabled'):
-                signal = "SHORT"
-                reason = "Strong BEAR Trend + RSI"
+                signal, reason = "SHORT", "Strong BEAR Trend"
 
-        # 3. ЛОГИКА ЗАКРЫТИЯ
-        if await get_setting('close_enabled'):
-            if (c < e55 and rsi > 70): # Пример закрытия лонга
-                signal = "CLOSE_LONG"
-                reason = "Long SL/TP (EMA55 Break)"
-            elif (c > e55 and rsi < 30): # Пример закрытия шорта
-                signal = "CLOSE_SHORT"
-                reason = "Short SL/TP (EMA55 Break)"
-
-        # ПРОВЕРКА КУЛДАУНА И ОТПРАВКА
         if signal:
             full_sig_key = f"{signal}_{symbol}_{tf}"
-            cd = COOLDOWNS.get(tf, 3600)
-            
-            if now_ts - LAST_SIGNALS.get(full_sig_key, 0) > cd:
+            if now_ts - LAST_SIGNALS.get(full_sig_key, 0) > COOLDOWNS.get(tf, 3600):
                 LAST_SIGNALS[full_sig_key] = now_ts
-                rounded_p = get_rounded_price(c)
-                
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute(
-                        "INSERT INTO signals (symbol, tf, direction, price, reason, ts) VALUES (?,?,?,?,?,?)",
-                        (symbol, tf, signal, rounded_p, reason, int(now_ts))
-                    )
-                    await db.commit()
-                
-                await send_to_webhook({
-                    "symbol": symbol.replace("/", ""),
-                    "signal": signal, "timeframe": tf, "price": rounded_p, "reason": reason
-                })
-                
-                icon = "🟢" if "LONG" in signal else "🔴" if "SHORT" in signal else "⚪"
-                await send_tg(f"{icon} <b>{signal}</b> | {symbol} [{tf}]\nЦена: <code>{rounded_p}</code>\n{reason}")
+                rp = get_rounded_price(c)
+                await send_to_webhook({"symbol": symbol.replace("/", ""), "signal": signal, "timeframe": tf, "price": rp, "reason": reason})
+                icon = "🟢" if "LONG" in signal else "🔴"
+                await send_tg(f"{icon} <b>{signal}</b> | {symbol} [{tf}]\nPrice: <code>{rp}</code>")
 
         await update_stat('total_scans')
-
     except Exception as e:
         await update_stat('errors')
-        logger.error(f"Error {symbol}: {e}")
 
 async def scanner_worker():
     ex = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
@@ -208,26 +159,20 @@ async def scanner_worker():
         try:
             async with aiosqlite.connect(DB_PATH) as db:
                 async with db.execute("SELECT symbol FROM coin_settings WHERE enabled=1") as cur:
-                    active_pairs = [r[0] for r in await cur.fetchall()]
-            
-            if active_pairs:
-                for i in range(0, len(active_pairs), 5):
-                    batch = active_pairs[i:i+5]
-                    await asyncio.gather(*[check_pair(ex, s) for s in batch])
+                    active = [r[0] for r in await cur.fetchall()]
+            if active:
+                for i in range(0, len(active), 5):
+                    await asyncio.gather(*[check_pair(ex, s) for s in active[i:i+5]])
                     await asyncio.sleep(0.5)
-            
             await asyncio.sleep(15)
-        except Exception as e:
-            logger.error(f"Worker Loop Error: {e}")
-            await asyncio.sleep(10)
+        except: await asyncio.sleep(10)
 
-# ========================= WEB APP =========================
+# ========================= WEB APP (UI 3.2.1) =========================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     asyncio.create_task(scanner_worker())
-    await send_tg("🚀 <b>OZ SCANNER v3.5.2</b> Запущен.")
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -248,59 +193,45 @@ async def login(password: str = Form(...)):
 async def admin_panel():
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT key, value FROM settings") as cur:
-            settings = {k: v for k, v in await cur.fetchall()}
+            sets = {k: v for k, v in await cur.fetchall()}
         async with db.execute("SELECT key, value FROM stats") as cur:
             stats = {k: v for k, v in await cur.fetchall()}
         async with db.execute("SELECT symbol, enabled, tf FROM coin_settings ORDER BY symbol ASC") as cur:
             coins = await cur.fetchall()
 
-    def btn_style(val):
-        return "background:#0f0;color:#000" if val == '1' else "background:#333;color:#888"
+    def get_btn(key, label):
+        active = sets.get(key) == '1'
+        color = "#0f0" if active else "#555"
+        bg = "rgba(0,255,0,0.1)" if active else "transparent"
+        return f'<a href="/toggle_s/{key}" style="text-decoration:none;color:{color};border:1px solid {color};padding:10px 20px;border-radius:5px;background:{bg};font-weight:bold">{label}</a>'
 
-    # Глобальные кнопки управления
-    controls = f'''
-    <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap">
-        <a href="/toggle_s/long_enabled" style="text-decoration:none;padding:15px 25px;border-radius:5px;font-weight:bold;{btn_style(settings.get('long_enabled'))}">LONG SIGNALS</a>
-        <a href="/toggle_s/short_enabled" style="text-decoration:none;padding:15px 25px;border-radius:5px;font-weight:bold;{btn_style(settings.get('short_enabled'))}">SHORT SIGNALS</a>
-        <a href="/toggle_s/close_enabled" style="text-decoration:none;padding:15px 25px;border-radius:5px;font-weight:bold;{btn_style(settings.get('close_enabled'))}">CLOSE ALERTS</a>
-        <a href="/panel" style="text-decoration:none;padding:15px 25px;border-radius:5px;font-weight:bold;background:#555;color:#fff">REFRESH</a>
-    </div>
-    '''
-
-    # Сетка монет
-    grid = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px">'
+    # ТАБЛИЦА МОНЕТ (UI 3.2.1 Style)
+    rows = ""
     for s, en, tf in coins:
         safe_s = s.replace("/", "---")
-        status_color = "#0f0" if en else "#555"
-        grid += f'''
-        <div style="background:#111;padding:15px;border:1px solid #333;border-radius:8px;text-align:center">
-            <b style="font-size:1.1em;color:#fff">{s}</b><br>
-            <span style="color:#888">{tf}</span><br><br>
-            <a href="/toggle_c/{safe_s}" style="text-decoration:none;color:{status_color};border:1px solid {status_color};padding:5px 15px;border-radius:3px;font-size:0.8em">
-                {"ENABLED" if en else "DISABLED"}
-            </a>
-        </div>'''
-    grid += '</div>'
+        btn = f'<a href="/toggle_c/{safe_s}" style="color:{"#0f0" if en else "#f00"};text-decoration:none"><b>[{"ON" if en else "OFF"}]</b></a>'
+        tf_links = "".join([f'<a href="/set_tf/{safe_s}/{t}" style="color:{"#0f0" if tf==t else "#555"};text-decoration:none;margin-right:8px">{t}</a>' for t in ['1m','5m','15m','30m','1h','4h']])
+        rows += f'<tr style="border-bottom:1px solid #222"><td style="padding:10px">{s}</td><td style="padding:10px">{btn}</td><td style="padding:10px">{tf_links}</td></tr>'
 
-    html = f'''
+    return f'''
     <html>
-    <head><title>OZ ULTRA PANEL</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
-    <body style="background:#050505;color:#0f0;font-family:sans-serif;padding:20px;margin:0">
-        <div style="max-width:1200px;margin:auto">
-            <h1 style="color:#0f0;margin-bottom:5px">OZ ULTRA PRO <small style="color:#555;font-size:0.4em">v3.5.2</small></h1>
-            <p style="background:#111;padding:10px;border-radius:5px;border-left:4px solid #0f0">
-                🚀 SCANS: <b>{stats.get('total_scans', 0)}</b> | 
-                📡 SIGNALS: <b>{stats.get('signals_sent', 0)}</b> | 
-                ⚠️ ERRORS: <span style="color:red">{stats.get('errors', 0)}</span>
-            </p>
-            {controls}
-            <h3 style="border-bottom:1px solid #222;padding-bottom:10px;color:#888">COIN MONITORING</h3>
-            {grid}
+    <head><title>OZ v3.2.1</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+    <body style="background:#000;color:#0f0;font-family:monospace;padding:20px">
+        <div style="max-width:800px;margin:auto">
+            <h2 style="color:#0f0;border-bottom:1px solid #0f0;padding-bottom:10px">OZ SCANNER PRO v3.2.1</h2>
+            <div style="display:flex;gap:10px;margin-bottom:20px">
+                {get_btn('long_enabled', 'LONG')} {get_btn('short_enabled', 'SHORT')} {get_btn('close_enabled', 'CLOSE')}
+                <a href="/panel" style="text-decoration:none;color:#fff;border:1px solid #fff;padding:10px 20px;border-radius:5px">REFRESH</a>
+            </div>
+            <p style="color:#888">SCANS: {stats.get('total_scans')} | SIGNALS: {stats.get('signals_sent')} | ERRORS: {stats.get('errors')}</p>
+            <table style="width:100%;border-collapse:collapse;background:#0a0a0a">
+                <tr style="background:#111;text-align:left"><th style="padding:10px">COIN</th><th style="padding:10px">STATUS</th><th style="padding:10px">TIMEFRAMES</th></tr>
+                {rows}
+            </table>
         </div>
     </body>
     </html>
     '''
-    return html
 
 @app.get("/toggle_s/{key}")
 async def toggle_setting(key: str):
@@ -314,6 +245,14 @@ async def toggle_c(symbol: str):
     real_symbol = symbol.replace("---", "/")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE coin_settings SET enabled = 1 - enabled WHERE symbol=?", (real_symbol,))
+        await db.commit()
+    return RedirectResponse("/panel")
+
+@app.get("/set_tf/{symbol}/{tf}")
+async def set_tf(symbol: str, tf: str):
+    real_symbol = symbol.replace("---", "/")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE coin_settings SET tf = ? WHERE symbol=?", (tf, real_symbol))
         await db.commit()
     return RedirectResponse("/panel")
 
