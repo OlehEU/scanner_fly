@@ -1,6 +1,6 @@
 # ========================= OZ SCANNER ULTRA PRO (4x) =========================
-# ВЕРСИЯ: 3.5.1 (Full Control Edition)
-# ОПИСАНИЕ: Добавлены кнопки управления закрытием позиций в веб-панель.
+# ВЕРСИЯ: 3.5.2 (Full Control Edition)
+# ОБНОВЛЕНИЕ: Актуализирован список монет (68 торговых пар) + Статистика в UI.
 # =============================================================================
 import ccxt.async_support as ccxt
 import asyncio
@@ -25,12 +25,20 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://bot-fly-oz.fly.dev/webhook")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
+# Обновленный список монет
 ALL_SYMBOLS = [
-    "DOGE/USDT", "1000SHIB/USDT", "1000PEPE/USDT", "1000BONK/USDT", 
-    "1000FLOKI/USDT", "1000SATS/USDT", "FARTCOIN/USDT", "PIPPIN/USDT", 
-    "BTT/USDT", "MASK/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", 
-    "ADA/USDT", "TRX/USDT", "MATIC/USDT", "DOT/USDT", "ATOM/USDT", 
-    "LINK/USDT", "AVAX/USDT", "NEAR/USDT", "XRP/USDT" 
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT",
+    "1000SHIB/USDT", "1000PEPE/USDT", "1000BONK/USDT", "1000FLOKI/USDT", "1000SATS/USDT",
+    "FARTCOIN/USDT", "PIPPIN/USDT", "BTT/USDT", "MASK/USDT",
+    "TRX/USDT", "TON/USDT", "DOT/USDT", "AVAX/USDT", "NEAR/USDT", "LINK/USDT",
+    "SUI/USDT", "WIF/USDT", "APT/USDT", "ARB/USDT", "OP/USDT", "INJ/USDT",
+    "FET/USDT", "FIL/USDT", "SEI/USDT", "RUNE/USDT", "JUP/USDT", "PYTH/USDT",
+    "ONDO/USDT", "RENDER/USDT", "JASMY/USDT", "LDO/USDT", "IMX/USDT", "ORDI/USDT",
+    "STX/USDT", "TIA/USDT", "UNI/USDT", "AAVE/USDT", "ICP/USDT", "HBAR/USDT",
+    "1000CAT/USDT", "1000RAT/USDT", "GOAT/USDT", "TURBO/USDT", "MOG/USDT",
+    "MEW/USDT", "POPCAT/USDT", "BRETT/USDT", "MOTHER/USDT", "GIGA/USDT",
+    "ATOM/USDT", "POL/USDT", "ALGO/USDT", "XLM/USDT", "BCH/USDT", "LTC/USDT", "EOS/USDT", "ENA/USDT",
+    "MATIC/USDT"
 ]
 
 ALL_TFS = ['1m', '5m', '15m', '30m', '1h', '4h']
@@ -128,12 +136,10 @@ async def check_pair(exchange, symbol, tf):
         df['ema55'] = talib.EMA(df['close'], 55)
         df['ema200'] = talib.EMA(df['close'], 200)
         df['rsi'] = talib.RSI(df['close'], 14)
-        df['atr'] = talib.ATR(df['high'], df['low'], df['close'], 14)
         
         last = df.iloc[-1]
         c, rsi = last['close'], last['rsi']
         e34, e55, e200 = last['ema34'], last['ema55'], last['ema200']
-        atr = last['atr'] or 0.0001
         
         if pd.isna(e200): return
 
@@ -141,7 +147,7 @@ async def check_pair(exchange, symbol, tf):
         now = datetime.now().timestamp()
         cd = COOLDOWNS.get(tf, {'long': 300, 'close': 300, 'short': 300, 'close_short': 300})
 
-        # --- Сигналы Входа ---
+        # --- Сигналы ---
         if await get_setting('long_entry_enabled') and (c > e34 > e55 > e200) and 45 < rsi < 75:
             if now - LAST_SIGNAL.get(f"L_{key}", 0) > cd['long']:
                 LAST_SIGNAL[f"L_{key}"] = now
@@ -152,7 +158,6 @@ async def check_pair(exchange, symbol, tf):
                 LAST_SIGNAL[f"S_{key}"] = now
                 await broadcast_signal(symbol, tf, "SHORT", c, "Strong Trend")
 
-        # --- Сигналы Закрытия ---
         if await get_setting('close_long_enabled') and (c < e55) and (now - LAST_SIGNAL.get(f"L_{key}", 0) < 86400):
              if now - LAST_SIGNAL.get(f"CL_{key}", 0) > cd['close']:
                 LAST_SIGNAL[f"CL_{key}"] = now
@@ -172,10 +177,11 @@ async def scanner_worker():
     
     while True:
         try:
-            active = [s for s in ALL_SYMBOLS if await is_coin_enabled(s)]
-            now = datetime.now().timestamp()
+            active = []
+            for s in ALL_SYMBOLS:
+                if await is_coin_enabled(s): active.append(s)
             
-            # Heartbeat каждые 15 минут
+            now = datetime.now().timestamp()
             if now - STATE["last_heartbeat"] > 900:
                 await send_telegram(f"🛰 <b>Статус Сканера</b>\nЦиклов: {STATE['cycles']}\nАктивных пар: {len(active)}")
                 STATE["last_heartbeat"] = now
@@ -221,11 +227,13 @@ async def login(password: str = Form(...)):
 @app.get("/panel", response_class=HTMLResponse)
 async def admin_panel():
     coin_rows = ""
+    active_count = 0
     async with aiosqlite.connect(DB_PATH) as db:
         for s in ALL_SYMBOLS:
             async with db.execute("SELECT enabled, tf FROM coin_settings WHERE symbol=?", (s,)) as cur:
                 row = await cur.fetchone()
                 enabled, tf = (row[0], row[1]) if row else (0, "1h")
+                if enabled: active_count += 1
                 status_color = "#0f4" if enabled else "#555"
                 btn_text = "OFF" if enabled else "ON"
                 tf_btns = "".join([f"<a href='/set_tf/{s.replace('/','_')}/{t}' style='color:{('#0f4' if t==tf else '#555')};text-decoration:none;'> [{t}] </a>" for t in ALL_TFS])
@@ -233,7 +241,6 @@ async def admin_panel():
                 <span style="color:{status_color};width:120px;">{s}</span><span>{tf_btns}</span>
                 <a href="/toggle/{s.replace('/','_')}" style="color:#0f4;">[{btn_text}]</a></div>"""
 
-    # Состояние глобальных кнопок
     l_en = await get_setting('long_entry_enabled')
     s_en = await get_setting('short_entry_enabled')
     cl_en = await get_setting('close_long_enabled')
@@ -243,17 +250,18 @@ async def admin_panel():
 
     return f"""<html><head><style>.btn {{ padding:10px;text-decoration:none;margin:5px;display:inline-block;font-weight:bold; }}</style></head>
     <body style="background:#050505;color:#0f4;font-family:monospace;padding:20px;">
-        <div style="border:1px solid #0f4;padding:15px;margin-bottom:20px;">
-            SYSTEM: ONLINE | CYCLES: {STATE['cycles']} | UPTIME: {datetime.now()-STATE['start_time']}
+        <div style="border:1px solid #0f4;padding:15px;margin-bottom:20px; display: flex; justify-content: space-between;">
+            <span>SYSTEM: <b>ONLINE</b> | CYCLES: {STATE['cycles']} | UPTIME: {str(datetime.now()-STATE['start_time']).split('.')[0]}</span>
+            <span style="color: #0ff;">ACTIVE COINS: <b>{active_count} / {len(ALL_SYMBOLS)}</b></span>
         </div>
-        <div style="margin-bottom:25px;">
+        <div style="margin-bottom:25px; text-align: center;">
             <a href="/tg/long_entry_enabled" class="btn" style="{get_btn_style(l_en)}">ENTRY LONG</a>
             <a href="/tg/short_entry_enabled" class="btn" style="{get_btn_style(s_en)}">ENTRY SHORT</a>
             <a href="/tg/close_long_enabled" class="btn" style="{get_btn_style(cl_en)}">CLOSE LONG</a>
             <a href="/tg/close_short_enabled" class="btn" style="{get_btn_style(cs_en)}">CLOSE SHORT</a>
             <a href="/signals" class="btn" style="border:1px solid #0ff;color:#0ff;">LOGS</a>
         </div>
-        <div style="max-width:800px;margin:auto;">{coin_rows}</div>
+        <div style="max-width:800px;margin:auto; border: 1px solid #333; padding: 10px;">{coin_rows}</div>
     </body></html>"""
 
 @app.get("/tg/{key}")
@@ -289,7 +297,7 @@ async def view_signals():
         async with db.execute("SELECT symbol, tf, direction, price, datetime(ts/1000, 'unixepoch', 'localtime') FROM signals ORDER BY ts DESC LIMIT 50") as cur:
             rows = await cur.fetchall()
     table = "".join([f"<tr><td style='padding:5px;'>{r[4]}</td><td>{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td><td>{r[3]}</td></tr>" for r in rows])
-    return f"<html><body style='background:#000;color:#0f4;padding:20px;'><table border=1 style='width:100%;text-align:center;'>{table}</table><br><a href='/panel' style='color:#0f4;'>BACK</a></body></html>"
+    return f"<html><body style='background:#000;color:#0f4;padding:20px;'><table border=1 style='width:100%;text-align:center; border-collapse: collapse;'>{table}</table><br><a href='/panel' style='color:#0f4; text-decoration: none;'>[ BACK TO PANEL ]</a></body></html>"
 
 if __name__ == "__main__":
     import uvicorn
